@@ -22,8 +22,8 @@ Windows spans a wallpaper by **pixels**. Put a 27" 1440p screen beside a 24" 108
 
 <table>
   <tr>
-    <th>In Multipapr</th>
-    <th>On the desk</th>
+    <th>Multipapr</th>
+    <th>Displays</th>
   </tr>
   <tr>
     <td><img src="assets/readme/demo-app.gif" alt="Resizing the wallpaper and moving display 2 in the Multipapr editor"></td>
@@ -31,7 +31,7 @@ Windows spans a wallpaper by **pixels**. Put a 27" 1440p screen beside a 24" 108
   </tr>
 </table>
 
-<sub>Left: a recording of the editor. Right: the same frames played on a 27" 1440p landscape monitor and a 24" 1080p portrait monitor. Dragging display 2 to where it sits on the desk closes the seam.</sub>
+<sub>Left: a recording of the editor. Right: the same frames played on a 27" 1440p landscape monitor and a 24" 1080p portrait monitor.</sub>
 
 ## Install
 
