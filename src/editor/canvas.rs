@@ -34,9 +34,9 @@ impl Camera {
         self.zoom = zoom;
     }
     fn transform(&self, area: Rect, frame: World) -> (Pos2, f32) {
-        let scale = ((area.width() - 64.).max(16.) / frame.w)
-            .min((area.height() - 64.).max(16.) / frame.h)
-            * self.zoom;
+        // Reserve 8.5% per side on the limiting axis when framing the composition.
+        let fitted = (area.size() * 0.83).max(Vec2::splat(1.));
+        let scale = (fitted.x / frame.w).min(fitted.y / frame.h) * self.zoom;
         let origin = area.center() + self.offset
             - vec2(frame.x + frame.w / 2., frame.y + frame.h / 2.) * scale;
         (origin, scale)
@@ -58,10 +58,7 @@ impl Editor {
             if Icon::Plus.button(ui, "Zoom in", false).clicked() {
                 self.camera.zoom_by(1.25, Vec2::ZERO);
             }
-            if ui
-                .add(Button::new("Reset scale").min_size(vec2(103., 34.)))
-                .clicked()
-            {
+            if ui.button("Reset scale").clicked() {
                 self.reframe();
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -279,6 +276,19 @@ impl Editor {
 mod tests {
     use super::*;
     #[test]
+    fn framed_composition_has_proportional_canvas_margins() {
+        let composition = World::new(-280., -110., 900., 530.);
+        for size in [vec2(474., 400.), vec2(1988., 1174.), vec2(2000., 750.)] {
+            let canvas = Rect::from_min_size(pos2(0., 50.), size);
+            let (origin, scale) = Camera::default().transform(canvas, composition);
+            let preview = screen_rect(origin, scale, composition);
+            assert!(preview.center().distance(canvas.center()) < 0.001);
+            let fraction = preview.size() / canvas.size();
+            assert!((fraction.x.max(fraction.y) - 0.83).abs() < 0.001);
+        }
+    }
+
+    #[test]
     fn zoom_keeps_point_under_pointer_after_panning() {
         let mut camera = Camera {
             offset: vec2(43., -71.),
@@ -302,7 +312,7 @@ mod tests {
             name: "a".into(),
             primary: true,
             px: World::new(0., 0., 800., 600.),
-            mm: [400., 300.],
+            mm: [415., 300.],
             estimated: false,
         };
         let settings = Settings::new(Media {
@@ -321,7 +331,7 @@ mod tests {
             },
         );
         editor.tool = Tool::Displays;
-        let area = Rect::from_min_size(Pos2::ZERO, vec2(864., 664.));
+        let area = Rect::from_min_size(Pos2::ZERO, vec2(1000., 750.));
         let frame_with_modifiers = |editor: &mut Editor, modifiers, events| {
             let _ = ctx.run(
                 RawInput {
