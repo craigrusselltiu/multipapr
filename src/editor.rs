@@ -183,7 +183,7 @@ impl Editor {
         let (tx, rx) = channel();
         self.pending = Some(rx);
         self.message = if storage::mpv().is_err() {
-            "Downloading mpv for wallpaper playback…".into()
+            "Preparing wallpaper playback…".into()
         } else {
             String::new()
         };

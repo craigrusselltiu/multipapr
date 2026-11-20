@@ -43,7 +43,7 @@ Windows spans a wallpaper by **pixels**. Put a 27" 1440p screen beside a 24" 108
 irm https://raw.githubusercontent.com/craigrusselltiu/multipapr/main/install.ps1 | iex
 ```
 
-The first time you set a wallpaper, Multipapr downloads a checksum-verified portable [mpv](https://mpv.io/) for playback. Requires Windows 10 or 11 on x64.
+Playback uses [mpv](https://mpv.io/), which is built into the exe and unpacked once on first use. No other downloads are needed. Requires Windows 10 or 11 on x64.
 
 ## How it works
 
@@ -62,12 +62,12 @@ The first time you set a wallpaper, Multipapr downloads a checksum-verified port
 3. **Line up the displays.** Use the monitor tool to drag each display into place. The wallpaper on your desktop updates as you drag.
 4. **Close the window.** The wallpaper keeps playing from the tray and starts again when you sign in.
 
-| | |
-|---|---|
-| **Pan / zoom** | Drag empty canvas or middle-drag. Scroll to zoom. **Reset scale** reframes. |
-| **Lock an axis** | Hold <kbd>Ctrl</kbd> to drag horizontally, <kbd>Ctrl</kbd>+<kbd>Shift</kbd> for vertically. |
-| **Tray** | Click to reopen the editor. Right-click → **Close** to stop the wallpaper. |
-| **Startup** | Toggle **Start at sign-in** from the settings cog. |
+<table>
+  <tr><td><b>Pan / zoom</b></td><td>Drag empty canvas or middle-drag. Scroll to zoom. <b>Reset scale</b> reframes.</td></tr>
+  <tr><td><b>Lock an axis</b></td><td>Hold <kbd>Ctrl</kbd> to drag horizontally, <kbd>Ctrl</kbd>+<kbd>Shift</kbd> for vertically.</td></tr>
+  <tr><td><b>Tray</b></td><td>Click to reopen the editor. Right-click → <b>Close</b> to stop the wallpaper.</td></tr>
+  <tr><td><b>Startup</b></td><td>Toggle <b>Start at sign-in</b> from the settings cog.</td></tr>
+</table>
 
 ## Light on resources
 

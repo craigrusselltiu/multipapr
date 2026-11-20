@@ -14,14 +14,15 @@ use std::{
 };
 use windows_sys::Win32::{
     Foundation::{WAIT_ABANDONED, WAIT_OBJECT_0},
-    System::Threading::{
-        CREATE_NO_WINDOW, CreateMutexW, INFINITE, ReleaseMutex, WaitForSingleObject,
+    System::{
+        LibraryLoader::{
+            FindResourceW, GetModuleHandleW, LoadResource, LockResource, SizeofResource,
+        },
+        Threading::{CREATE_NO_WINDOW, CreateMutexW, INFINITE, ReleaseMutex, WaitForSingleObject},
     },
 };
 use winreg::{RegKey, enums::HKEY_CURRENT_USER};
 
-const MPV_URL: &str = "https://github.com/shinchiro/mpv-winbuild-cmake/releases/download/20261111/mpv-x86_64-20261111-git-bcde6b93cc.7z";
-const MPV_SHA256: &str = "f259b5fd4b5c395617c948a4fadcdf55bba1c5282fb7c13e88626b3f71072baf";
 const MPV_SETUP_MUTEX: &str = r"Local\Multipapr.MpvSetup.v1";
 
 pub fn home() -> Result<PathBuf> {
@@ -35,9 +36,14 @@ pub fn command(name: impl AsRef<std::ffi::OsStr>) -> Command {
     cmd.creation_flags(CREATE_NO_WINDOW);
     cmd
 }
+fn mpv_dir() -> Result<PathBuf> {
+    let tools = home()?.join("tools");
+    fs::create_dir_all(&tools)?;
+    Ok(tools.join(concat!("mpv-", env!("MPV_BUILD"))))
+}
 pub fn mpv() -> Result<PathBuf> {
     let mut paths = vec![
-        home()?.join("tools/mpv/mpv.exe"),
+        mpv_dir()?.join("mpv.exe"),
         env::current_exe()?.with_file_name("mpv.exe"),
     ];
     paths.extend(
@@ -48,12 +54,23 @@ pub fn mpv() -> Result<PathBuf> {
         .find(|p| p.is_file())
         .context("Install mpv or place mpv.exe beside multipapr.exe")
 }
+// build.rs downloads, verifies and embeds the pinned mpv build as resource 101.
+fn mpv_archive() -> Result<&'static [u8]> {
+    unsafe {
+        let module = GetModuleHandleW(null());
+        let res = FindResourceW(module, 101 as _, 10 as _); // 10 = RT_RCDATA
+        ensure!(!res.is_null(), "The bundled mpv is missing");
+        let data = LockResource(LoadResource(module, res)) as *const u8;
+        ensure!(!data.is_null(), "Cannot load the bundled mpv");
+        Ok(std::slice::from_raw_parts(
+            data,
+            SizeofResource(module, res) as usize,
+        ))
+    }
+}
 pub fn ensure_mpv() -> Result<PathBuf> {
     if let Ok(path) = mpv() {
         return Ok(path);
-    }
-    if env::var("PROCESSOR_ARCHITECTURE").as_deref() != Ok("AMD64") {
-        return mpv();
     }
     let mutex =
         Handle::checked(unsafe { CreateMutexW(null(), 0, wide(MPV_SETUP_MUTEX).as_ptr()) })?;
@@ -74,41 +91,14 @@ pub fn ensure_mpv() -> Result<PathBuf> {
     if let Ok(path) = mpv() {
         return Ok(path);
     }
-    let mpv_dir = home()?.join("tools").join("mpv");
-    let script = format!(
-        r#"$ErrorActionPreference = 'Stop'
-$mpvDir = '{dir}'
-$tmp = Join-Path ([IO.Path]::GetTempPath()) ("multipapr-mpv-" + [guid]::NewGuid() + ".7z")
-try {{
-    Invoke-WebRequest -UseBasicParsing '{url}' -OutFile $tmp
-    $hash = [BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash([IO.File]::ReadAllBytes($tmp))).Replace('-', '')
-    if ($hash -ne '{sha}') {{
-        throw 'mpv archive checksum mismatch'
-    }}
-    New-Item -ItemType Directory -Force -Path $mpvDir | Out-Null
-    tar.exe -xf $tmp -C $mpvDir 2>$null
-    if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath (Join-Path $mpvDir 'mpv.exe'))) {{
-        $seven = Get-Command 7z.exe -ErrorAction SilentlyContinue
-        if (-not $seven) {{ throw 'Could not extract mpv archive with tar.exe' }}
-        & $seven.Source x -y "-o$mpvDir" $tmp | Out-Null
-        if ($LASTEXITCODE -ne 0) {{ throw 'mpv extraction failed' }}
-    }}
-}} finally {{
-    if (Test-Path -LiteralPath $tmp) {{ Remove-Item -LiteralPath $tmp -Force }}
-}}"#,
-        dir = mpv_dir.display().to_string().replace('\'', "''"),
-        url = MPV_URL,
-        sha = MPV_SHA256,
-    );
-    let out = command("powershell.exe")
-        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
-        .output()
-        .context("Cannot launch PowerShell to download mpv")?;
-    ensure!(
-        out.status.success(),
-        "Could not download mpv: {}",
-        String::from_utf8_lossy(&out.stderr).trim()
-    );
+    // Windows cannot run an executable from memory, so unpack the bundled build once.
+    let dir = mpv_dir()?;
+    let staging = dir.with_extension("partial");
+    let _ = fs::remove_dir_all(&staging);
+    let _ = fs::remove_dir_all(&dir);
+    sevenz_rust2::decompress(std::io::Cursor::new(mpv_archive()?), &staging)
+        .context("Cannot unpack the bundled mpv")?;
+    fs::rename(&staging, &dir)?;
     mpv()
 }
 pub fn save<T: serde::Serialize>(name: &str, value: &T) -> Result<()> {

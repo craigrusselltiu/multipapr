@@ -11,7 +11,7 @@ $ErrorActionPreference = 'Stop'
 $repo = 'craigrusselltiu/multipapr'
 $installDir = Join-Path $env:LOCALAPPDATA 'Multipapr'
 $installed = Join-Path $installDir 'multipapr.exe'
-$mpvDir = Join-Path $installDir 'tools\mpv'
+$mpvDir = Join-Path $installDir 'tools\mpv'  # legacy download location
 
 $localRepo = $PSScriptRoot -and (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'Cargo.toml'))
 $buildFromSource = $FromSource -or ($localRepo -and -not $FromRelease)
@@ -50,31 +50,6 @@ try {
         $binary = $tempBinary
     }
 
-    if (-not (Test-Path -LiteralPath (Join-Path $mpvDir 'mpv.exe')) -and -not (Get-Command mpv.exe -ErrorAction SilentlyContinue)) {
-        if ($env:PROCESSOR_ARCHITECTURE -ne 'AMD64') {
-            throw 'Install mpv for your architecture and put mpv.exe on PATH.'
-        }
-        $archive = Join-Path ([IO.Path]::GetTempPath()) ("multipapr-mpv-" + [guid]::NewGuid() + ".7z")
-        try {
-            Write-Host 'Downloading portable mpv...' -ForegroundColor Cyan
-            $url = 'https://github.com/shinchiro/mpv-winbuild-cmake/releases/download/20261111/mpv-x86_64-20261111-git-bcde6b93cc.7z'
-            Invoke-WebRequest -UseBasicParsing $url -OutFile $archive
-            if ((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash -ne 'f259b5fd4b5c395617c948a4fadcdf55bba1c5282fb7c13e88626b3f71072baf') {
-                throw 'mpv archive checksum mismatch'
-            }
-            New-Item -ItemType Directory -Force -Path $mpvDir | Out-Null
-            tar.exe -xf $archive -C $mpvDir 2>$null
-            if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath (Join-Path $mpvDir 'mpv.exe'))) {
-                $seven = Get-Command 7z.exe -ErrorAction SilentlyContinue
-                if (-not $seven) { throw 'mpv extraction failed (requires Windows 11 tar.exe or 7-Zip)' }
-                & $seven.Source x -y "-o$mpvDir" $archive | Out-Null
-                if ($LASTEXITCODE -ne 0) { throw 'mpv extraction failed' }
-            }
-        } finally {
-            if (Test-Path -LiteralPath $archive) { Remove-Item -LiteralPath $archive -Force }
-        }
-    }
-
     $hosts = @(Get-Process multipapr -ErrorAction SilentlyContinue | Where-Object Path -eq $installed)
     if ($hosts) {
         Start-Process -FilePath $installed -ArgumentList '--stop' -WindowStyle Hidden -Wait
@@ -84,6 +59,9 @@ try {
             }
         }
     }
+
+    # mpv is now bundled in multipapr.exe; remove the copy older installers downloaded.
+    Remove-Item -LiteralPath $mpvDir -Recurse -Force -ErrorAction SilentlyContinue
 
     Copy-Item -LiteralPath $binary -Destination $installed -Force
 

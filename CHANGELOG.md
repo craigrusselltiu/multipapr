@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## v0.1.1
+
+### Changed
+
+- mpv is now built into `multipapr.exe` and unpacked locally on first use, so playback works offline with no extra download.
+- The installer no longer downloads mpv and removes the copy that earlier versions downloaded.
+
 ## v0.1.0
 
 ### Added
