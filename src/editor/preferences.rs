@@ -1,78 +1,95 @@
-use super::{Editor, INK, LINE, MUTED, PANEL, heading_font, icons::Icon, storage};
-use eframe::egui::*;
-use std::time::{Duration, Instant};
+use super::{Editor, LINE, MUTED, PANEL, heading_font, icons::Icon, storage};
+use eframe::{
+    egui::*,
+    egui_glow::CallbackFn,
+    glow::{self, HasContext},
+};
+use std::sync::Arc;
 
+#[derive(Default)]
 pub(super) struct SettingsPopup {
-    backdrop: Option<TextureHandle>,
-    requested: Instant,
     error: Option<String>,
 }
 
-impl SettingsPopup {
-    pub(super) fn capture(ctx: &Context) -> Self {
-        ctx.send_viewport_cmd(ViewportCommand::Screenshot(UserData::default()));
-        ctx.request_repaint();
-        Self {
-            backdrop: None,
-            requested: Instant::now(),
-            error: None,
-        }
+// Each linear reduction averages a 2×2 area. Expanding the same pyramid
+// softens the result while keeping the dialog itself at native resolution.
+fn blur_editor(info: PaintCallbackInfo, painter: &eframe::egui_glow::Painter) {
+    let gl = painter.gl();
+    let [width, height] = info.screen_size_px.map(|n| n as i32);
+    if width == 0 || height == 0 {
+        return;
     }
-
-    pub(super) fn ready(&mut self, ctx: &Context) -> bool {
-        if self.backdrop.is_none() {
-            let frame = ctx.input(|i| {
-                i.events.iter().find_map(|e| match e {
-                    Event::Screenshot { image, .. } => Some(image.clone()),
-                    _ => None,
-                })
-            });
-            if let Some(frame) = frame {
-                // Sample the editor framebuffer once at quarter logical resolution.
-                // The reduced texture keeps the blur inexpensive on high-DPI displays.
-                let stride = (4. * ctx.pixels_per_point()).round().max(1.) as usize;
-                let [w, h] = frame.size;
-                let small = image::RgbImage::from_fn(
-                    w.div_ceil(stride) as u32,
-                    h.div_ceil(stride) as u32,
-                    |x, y| {
-                        let x = (x as usize * stride + stride / 2).min(w - 1);
-                        let y = (y as usize * stride + stride / 2).min(h - 1);
-                        let c = frame[(x, y)];
-                        image::Rgb([c.r(), c.g(), c.b()])
-                    },
-                );
-                let blur = image::imageops::blur(&small, 1.65);
-                let image = ColorImage::from_rgb(
-                    [blur.width() as usize, blur.height() as usize],
-                    blur.as_raw(),
-                );
-                self.backdrop =
-                    Some(ctx.load_texture("Settings background", image, TextureOptions::LINEAR));
-            } else if self.requested.elapsed() < Duration::from_millis(350) {
-                ctx.request_repaint_after(Duration::from_millis(16));
-                return false;
+    let screen = (painter.intermediate_fbo(), width, height);
+    let depth = (16. * info.pixels_per_point).log2().round().clamp(1., 6.) as usize;
+    let mut levels = Vec::with_capacity(depth + 1);
+    levels.push(screen);
+    let mut buffers = Vec::with_capacity(depth);
+    unsafe {
+        let previous_buffer = gl.get_parameter_renderbuffer(glow::RENDERBUFFER_BINDING);
+        gl.disable(glow::SCISSOR_TEST);
+        let blit = |(src, sw, sh), (dst, dw, dh)| {
+            gl.bind_framebuffer(glow::READ_FRAMEBUFFER, src);
+            gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, dst);
+            gl.blit_framebuffer(
+                0,
+                0,
+                sw,
+                sh,
+                0,
+                0,
+                dw,
+                dh,
+                glow::COLOR_BUFFER_BIT,
+                glow::LINEAR,
+            );
+        };
+        for _ in 0..depth {
+            let previous = *levels.last().unwrap();
+            let (w, h) = ((previous.1 / 2).max(1), (previous.2 / 2).max(1));
+            let Ok(fbo) = gl.create_framebuffer() else {
+                break;
+            };
+            let Ok(buffer) = gl.create_renderbuffer() else {
+                gl.delete_framebuffer(fbo);
+                break;
+            };
+            buffers.push((fbo, buffer));
+            gl.bind_renderbuffer(glow::RENDERBUFFER, Some(buffer));
+            gl.renderbuffer_storage(glow::RENDERBUFFER, glow::RGBA8, w, h);
+            gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(fbo));
+            gl.framebuffer_renderbuffer(
+                glow::DRAW_FRAMEBUFFER,
+                glow::COLOR_ATTACHMENT0,
+                glow::RENDERBUFFER,
+                Some(buffer),
+            );
+            if gl.check_framebuffer_status(glow::DRAW_FRAMEBUFFER) != glow::FRAMEBUFFER_COMPLETE {
+                break;
             }
+            let level = (Some(fbo), w, h);
+            blit(previous, level);
+            levels.push(level);
         }
-        true
+        for pair in levels.windows(2).rev() {
+            blit(pair[1], pair[0]);
+        }
+        gl.bind_framebuffer(glow::FRAMEBUFFER, screen.0);
+        gl.bind_renderbuffer(glow::RENDERBUFFER, previous_buffer);
+        gl.enable(glow::SCISSOR_TEST);
+        for (fbo, buffer) in buffers {
+            gl.delete_framebuffer(fbo);
+            gl.delete_renderbuffer(buffer);
+        }
     }
 }
 
 impl Editor {
     pub(super) fn show_preferences(&mut self, ctx: &Context) {
         let popup = self.popup.as_mut().unwrap();
-        CentralPanel::default()
-            .frame(Frame::new().fill(INK))
-            .show(ctx, |ui| {
-                if let Some(tex) = &popup.backdrop {
-                    ui.painter().image(
-                        tex.id(),
-                        ui.max_rect(),
-                        Rect::from_min_max(Pos2::ZERO, pos2(1., 1.)),
-                        Color32::WHITE,
-                    );
-                }
-            });
+        ctx.layer_painter(LayerId::background()).add(PaintCallback {
+            rect: ctx.screen_rect(),
+            callback: Arc::new(CallbackFn::new(blur_editor)),
+        });
         let response = Modal::new(Id::new("settings dialog"))
             .backdrop_color(Color32::from_black_alpha(72))
             .frame(

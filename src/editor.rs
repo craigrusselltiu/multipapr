@@ -491,10 +491,6 @@ impl eframe::App for Editor {
             self.last_check = Instant::now();
         }
         ctx.request_repaint_after(Duration::from_secs(3));
-        if self.popup.as_mut().is_some_and(|popup| popup.ready(ctx)) {
-            self.show_preferences(ctx);
-            return;
-        }
         if self.popup.is_none()
             && let Some(path) =
                 ctx.input(|i| i.raw.dropped_files.first().and_then(|f| f.path.clone()))
@@ -528,7 +524,10 @@ impl eframe::App for Editor {
             .show(ctx, |ui| self.canvas(ui));
         self.sync(ctx);
         if open_settings && self.popup.is_none() {
-            self.popup = Some(preferences::SettingsPopup::capture(ctx));
+            self.popup = Some(preferences::SettingsPopup::default());
+        }
+        if self.popup.is_some() {
+            self.show_preferences(ctx);
         }
     }
     fn on_exit(&mut self, _: Option<&eframe::glow::Context>) {

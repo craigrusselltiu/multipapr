@@ -205,7 +205,7 @@ struct Player {
     surface: Surface,
     pipe: PathBuf,
     desktop: Rect,
-    paused: bool,
+    covered: bool,
 }
 impl Player {
     fn open(settings: &Settings, displays: &[Display]) -> Result<Self> {
@@ -213,6 +213,8 @@ impl Player {
         let dir = storage::home()?;
         let shader_path = dir.join("layout.glsl");
         fs::write(&shader_path, shader::generate(displays, &layout))?;
+        let profile = dir.join("playback.conf");
+        fs::write(&profile, include_bytes!("../assets/playback.conf"))?;
         let surface = Surface::create(layout.desktop)?;
         let pipe = player_pipe(std::process::id());
         let log = fs::File::create(dir.join("player.log"))?;
@@ -243,6 +245,7 @@ impl Player {
                 "--d3d11-flip=no",
             ])
             .arg(format!("--wid={}", surface.hwnd as usize))
+            .arg(format!("--include={}", profile.display()))
             .arg(format!("--glsl-shader={}", shader_path.display()))
             .arg(format!(
                 "--glsl-shader-opts={}",
@@ -262,7 +265,7 @@ impl Player {
             surface,
             pipe,
             desktop: layout.desktop,
-            paused: false,
+            covered: false,
         })
     }
     fn update(&mut self) -> Result<()> {
@@ -273,8 +276,8 @@ impl Player {
         if let Some(status) = self.process.child.try_wait()? {
             anyhow::bail!("Wallpaper player exited ({status}). See player.log");
         }
-        let pause = desktop::locked_or_covered(self.desktop);
-        if pause != self.paused {
+        let covered = desktop::locked_or_covered(self.desktop);
+        if covered != self.covered {
             if let Ok(mut ipc) = fs::OpenOptions::new()
                 .read(true)
                 .write(true)
@@ -283,9 +286,9 @@ impl Player {
                 writeln!(
                     ipc,
                     "{}",
-                    serde_json::json!({"command":["set_property","pause",pause]})
+                    serde_json::json!({"command":["set_property","user-data/multipapr/covered",covered]})
                 )?;
-                self.paused = pause;
+                self.covered = covered;
             }
         }
         Ok(())

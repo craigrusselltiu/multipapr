@@ -39,4 +39,4 @@ multipapr.exe --stop
 
 `--apply` fits a new file to the calibrated display layout. On first use it also enables startup. Run without arguments to open the editor, or with `--background` to start in the tray. `--stop` quits the tray and wallpaper host. Build and test with `cargo build --release --locked` and `cargo test --release --locked`.
 
-[High-level design](PLAN.md) · [mpv](https://mpv.io/) · [Windows mpv builds](https://github.com/shinchiro/mpv-winbuild-cmake)
+[mpv](https://mpv.io/) · [Windows mpv builds](https://github.com/shinchiro/mpv-winbuild-cmake)
