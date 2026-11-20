@@ -54,12 +54,44 @@ pub struct Media {
     pub width: u32,
     pub height: u32,
 }
+// Resampling filter used by the display mapping shader. Values match the
+// shader's `upscaler` parameter; the kernels follow mpv's filter definitions.
+#[derive(Clone, Copy, Default, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Upscaling {
+    None,
+    #[default]
+    CatmullRom,
+    Spline36,
+    Lanczos,
+    EwaLanczosSharp,
+}
+impl Upscaling {
+    pub const ALL: [Self; 5] = [
+        Self::None,
+        Self::CatmullRom,
+        Self::Spline36,
+        Self::Lanczos,
+        Self::EwaLanczosSharp,
+    ];
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::None => "None",
+            Self::CatmullRom => "Catmull-Rom",
+            Self::Spline36 => "Spline36",
+            Self::Lanczos => "Lanczos",
+            Self::EwaLanczosSharp => "EWA Lanczos Sharp",
+        }
+    }
+}
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct Settings {
     pub media: Media,
     pub scale: f32,
     pub pan: [f32; 2],
     pub calibration: BTreeMap<String, Calibration>,
+    #[serde(default)]
+    pub upscaling: Upscaling,
 }
 impl Settings {
     pub fn new(media: Media) -> Self {
@@ -68,6 +100,7 @@ impl Settings {
             scale: 1.,
             pan: [0.; 2],
             calibration: BTreeMap::new(),
+            upscaling: Upscaling::default(),
         }
     }
 }

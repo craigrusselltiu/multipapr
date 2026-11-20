@@ -2,6 +2,12 @@
 
 All notable changes to this project are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## v0.1.3
+
+### Added
+
+- **Upscaling** option in the wallpaper sidebar: None, Catmull-Rom (default), Spline36, Lanczos and EWA Lanczos Sharp, using mpv's filter definitions. Changes apply to the running wallpaper live.
+
 ## v0.1.2
 
 ### Changed

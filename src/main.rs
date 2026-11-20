@@ -37,6 +37,7 @@ fn run() -> Result<()> {
             let mut s = layout::Settings::new(media);
             if let Some(previous) = previous {
                 s.calibration = previous.calibration;
+                s.upscaling = previous.upscaling;
             }
             layout::Layout::new(&displays::detect()?, &s.calibration).cover(&mut s);
             storage::apply(&s)?;

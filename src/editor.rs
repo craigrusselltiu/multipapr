@@ -4,7 +4,7 @@ mod icons;
 mod preferences;
 use crate::{
     displays, host,
-    layout::{Display, Layout, Media, Rect as World, Settings},
+    layout::{Display, Layout, Media, Rect as World, Settings, Upscaling},
     storage,
 };
 use anyhow::Result;
@@ -431,6 +431,23 @@ impl Editor {
             if Self::field(ui, "Scale", None, &mut percent, 1.0..=10000.0, " %") {
                 self.settings.scale = percent / 100.;
             }
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Upscaling").color(MUTED));
+                ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                    ComboBox::from_id_salt("upscaling")
+                        .width(150.)
+                        .selected_text(self.settings.upscaling.label())
+                        .show_ui(ui, |ui| {
+                            for option in Upscaling::ALL {
+                                ui.selectable_value(
+                                    &mut self.settings.upscaling,
+                                    option,
+                                    option.label(),
+                                );
+                            }
+                        });
+                });
+            });
         }
     }
 

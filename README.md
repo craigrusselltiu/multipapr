@@ -56,7 +56,7 @@ irm https://raw.githubusercontent.com/craigrusselltiu/multipapr/main/install.ps1
 > **Measure once.** Multipapr reads each panel's size from the monitor. Drag a display to where it actually sits, or type the gap in millimetres under **Advanced**. Include both bezels and any air gap.
 
 1. **Choose a file:** an MP4, MOV, MKV or WebM video, or a PNG, JPEG, WebP or BMP image. You can also drop it onto the canvas.
-2. **Frame it.** Drag the wallpaper to move it and drag its corner to resize it. **Fill** shows it at native size, so a 4K image appears twice the size of a 1080p panel. **Fit** covers every display.
+2. **Frame it.** Drag the wallpaper to move it and drag its corner to resize it. **Fill** shows it at native size, so a 4K image appears twice the size of a 1080p panel. **Fit** covers every display. **Upscaling** picks the resampling filter: Catmull-Rom by default, or None, Spline36, Lanczos or EWA Lanczos Sharp. Sharper filters cost more GPU time.
 3. **Line up the displays.** Use the monitor tool to drag each display into place. The wallpaper on your desktop updates as you drag.
 4. **Close the window.** The wallpaper keeps playing from the tray and starts again when you sign in.
 
