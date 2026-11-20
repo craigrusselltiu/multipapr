@@ -31,7 +31,7 @@ impl Rect {
     }
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Display {
     pub id: String,
     pub name: String,

@@ -3,25 +3,29 @@ use crate::{
     displays,
     layout::{Display, Layout, Rect, Settings},
     shader, storage,
+    tray::{self, Tray},
 };
 use anyhow::{Context, Result, ensure};
 use std::{
     fs,
-    io::Write,
+    io::{self, Write},
     os::windows::io::AsRawHandle,
     path::{Path, PathBuf},
-    process::Child,
-    ptr::null,
+    process::{Child, Command},
+    ptr::{null, null_mut},
     time::{Duration, Instant, SystemTime},
 };
 use windows_sys::Win32::{
     Foundation::*,
     System::{JobObjects::*, Threading::*},
+    UI::WindowsAndMessaging::*,
 };
 
 const INSTANCE: &str = r"Local\Multipapr.Host.v1";
 const STOP: &str = r"Local\Multipapr.Stop.v1";
-pub fn running() -> bool {
+const OPEN: &str = r"Local\Multipapr.OpenEditor.v1";
+
+fn running() -> bool {
     unsafe {
         let h = OpenMutexW(SYNCHRONIZATION_SYNCHRONIZE, 0, wide(INSTANCE).as_ptr());
         if h.is_null() {
@@ -45,10 +49,142 @@ pub fn stop() -> Result<()> {
     }
 }
 
-struct Player {
+pub fn start() -> Result<()> {
+    if !running() {
+        storage::command(std::env::current_exe()?)
+            .arg("--background")
+            .spawn()
+            .context("Cannot start Multipapr")?;
+    }
+    Ok(())
+}
+
+struct ManagedChild {
     child: Child,
-    surface: Surface,
     _job: Handle,
+}
+
+impl ManagedChild {
+    fn spawn(command: &mut Command) -> Result<Self> {
+        let job = unsafe {
+            let job = Handle::checked(CreateJobObjectW(null(), null()))?;
+            let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+            limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            ensure!(
+                SetInformationJobObject(
+                    job.0,
+                    JobObjectExtendedLimitInformation,
+                    (&limits as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
+                    size_of_val(&limits) as u32
+                ) != 0,
+                "Cannot configure child process lifetime"
+            );
+            job
+        };
+        let mut child = command.spawn()?;
+        if unsafe { AssignProcessToJobObject(job.0, child.as_raw_handle()) } == 0 {
+            let error = io::Error::last_os_error();
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error).context("Cannot supervise child process");
+        }
+        Ok(Self { child, _job: job })
+    }
+}
+
+impl Drop for ManagedChild {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+#[derive(Default)]
+struct EditorProcess(Option<ManagedChild>);
+
+impl EditorProcess {
+    fn open(&mut self) -> Result<()> {
+        if let Some(editor) = self.0.as_mut() {
+            if editor.child.try_wait()?.is_none() {
+                let hwnd = editor_window(editor.child.id());
+                if !hwnd.is_null() {
+                    unsafe {
+                        if IsIconic(hwnd) != 0 {
+                            ShowWindowAsync(hwnd, SW_RESTORE);
+                        }
+                        SetForegroundWindow(GetLastActivePopup(hwnd));
+                    }
+                }
+                return Ok(());
+            }
+        }
+        let editor =
+            ManagedChild::spawn(storage::command(std::env::current_exe()?).arg("--editor"))
+                .context("Cannot open Multipapr editor")?;
+        unsafe {
+            AllowSetForegroundWindow(editor.child.id());
+        }
+        self.0 = Some(editor);
+        Ok(())
+    }
+
+    fn reap(&mut self) -> Result<()> {
+        if let Some(editor) = self.0.as_mut() {
+            if editor.child.try_wait()?.is_some() {
+                self.0 = None;
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Drop for EditorProcess {
+    fn drop(&mut self) {
+        if let Some(editor) = self.0.as_ref() {
+            let hwnd = editor_window(editor.child.id());
+            if !hwnd.is_null() {
+                unsafe {
+                    PostMessageW(hwnd, WM_CLOSE, 0, 0);
+                    WaitForSingleObject(editor.child.as_raw_handle(), 500);
+                }
+            }
+        }
+    }
+}
+
+fn editor_window(pid: u32) -> HWND {
+    struct Search {
+        pid: u32,
+        hwnd: HWND,
+    }
+    unsafe extern "system" fn find(hwnd: HWND, data: LPARAM) -> BOOL {
+        unsafe {
+            let search = &mut *(data as *mut Search);
+            let mut pid = 0;
+            GetWindowThreadProcessId(hwnd, &mut pid);
+            if pid == search.pid
+                && IsWindowVisible(hwnd) != 0
+                && GetWindow(hwnd, GW_OWNER).is_null()
+            {
+                search.hwnd = hwnd;
+                return 0;
+            }
+            1
+        }
+    }
+    let mut search = Search {
+        pid,
+        hwnd: null_mut(),
+    };
+    unsafe {
+        EnumWindows(Some(find), std::ptr::from_mut(&mut search) as LPARAM);
+    }
+    search.hwnd
+}
+
+struct Player {
+    process: ManagedChild,
+    surface: Surface,
     pipe: PathBuf,
     desktop: Rect,
     paused: bool,
@@ -61,27 +197,15 @@ impl Player {
         fs::write(&shader_path, shader::generate(displays, &layout, settings))?;
         let surface = Surface::create(layout.desktop)?;
         let pipe = PathBuf::from(format!(r"\\.\pipe\multipapr-player-{}", std::process::id()));
-        let job = unsafe {
-            let job = Handle::checked(CreateJobObjectW(null(), null()))?;
-            let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
-            limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-            ensure!(
-                SetInformationJobObject(
-                    job.0,
-                    JobObjectExtendedLimitInformation,
-                    (&limits as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
-                    size_of_val(&limits) as u32
-                ) != 0,
-                "Cannot configure player lifetime"
-            );
-            job
-        };
-        let mut child = storage::command(storage::mpv()?)
+        let mut command = storage::command(storage::mpv()?);
+        command
             .args([
                 "--no-config",
+                "--player-operation-mode=cplayer",
                 "--vo=gpu-next",
                 "--gpu-api=d3d11",
                 "--hwdec=auto",
+                "--cscale=bilinear",
                 "--no-audio",
                 "--no-sub",
                 "--loop-file=inf",
@@ -103,18 +227,11 @@ impl Player {
             .arg(format!("--log-file={}", dir.join("player.log").display()))
             .arg("--msg-level=all=warn")
             .arg("--")
-            .arg(&settings.media.path)
-            .spawn()
-            .context("Cannot launch mpv")?;
-        if unsafe { AssignProcessToJobObject(job.0, child.as_raw_handle()) } == 0 {
-            let _ = child.kill();
-            let _ = child.wait();
-            anyhow::bail!("Cannot supervise wallpaper player");
-        }
+            .arg(&settings.media.path);
+        let process = ManagedChild::spawn(&mut command).context("Cannot launch mpv")?;
         Ok(Self {
-            child,
+            process,
             surface,
-            _job: job,
             pipe,
             desktop: layout.desktop,
             paused: false,
@@ -125,7 +242,7 @@ impl Player {
             self.surface.valid(),
             "Explorer recreated the wallpaper surface"
         );
-        if let Some(status) = self.child.try_wait()? {
+        if let Some(status) = self.process.child.try_wait()? {
             anyhow::bail!("Wallpaper player exited ({status}). See player.log");
         }
         let pause = desktop::locked_or_covered(self.desktop);
@@ -146,56 +263,66 @@ impl Player {
         Ok(())
     }
 }
-impl Drop for Player {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
 
 fn version(path: &Path) -> Option<SystemTime> {
     fs::metadata(path).ok()?.modified().ok()
 }
-fn signature(d: &[Display]) -> String {
-    serde_json::to_string(d).unwrap_or_default()
-}
-
-pub fn run() -> Result<()> {
+pub fn run(mut show_editor: bool) -> Result<()> {
+    let open = Handle::checked(unsafe { CreateEventW(null(), 0, 0, wide(OPEN).as_ptr()) })?;
     let mutex = unsafe { CreateMutexW(null(), 0, wide(INSTANCE).as_ptr()) };
     let existing = unsafe { GetLastError() } == ERROR_ALREADY_EXISTS;
     let _mutex = Handle::checked(mutex)?;
     if existing {
+        if show_editor {
+            Tray::allow_focus();
+            ensure!(
+                unsafe { SetEvent(open.0) } != 0,
+                "Cannot signal editor request"
+            );
+        }
         return Ok(());
     }
-    let event = Handle::checked(unsafe { CreateEventW(null(), 1, 0, wide(STOP).as_ptr()) })?;
+    let stop = Handle::checked(unsafe { CreateEventW(null(), 1, 0, wide(STOP).as_ptr()) })?;
+    let mut tray = Tray::new()?;
+    let mut editor = EditorProcess::default();
     let dir = storage::home()?;
     let config = dir.join("layout.json");
     let mut stamp = None;
-    let mut topology = String::new();
+    let mut topology = Vec::new();
     let mut player: Option<Player> = None;
     let mut next = Instant::now();
     let mut recheck = Instant::now();
     let mut displays = Vec::new();
     let mut last_error = fs::read_to_string(dir.join("host-error.txt")).unwrap_or_default();
     loop {
-        if unsafe { WaitForSingleObject(event.0, 0) } == WAIT_OBJECT_0 {
-            break;
+        match tray.command() {
+            Some(tray::Command::Close) => break,
+            Some(tray::Command::Open) => show_editor = true,
+            None => {}
+        }
+        tray.update();
+        if show_editor {
+            editor.open()?;
         }
         let now = Instant::now();
         if now >= next {
+            editor.reap()?;
             let result = (|| -> Result<()> {
+                let new_stamp = version(&config);
+                if new_stamp.is_none() {
+                    drop(player.take());
+                    return Ok(());
+                }
                 if now >= recheck || displays.is_empty() {
                     displays = displays::detect()?;
                     recheck = now + Duration::from_secs(4);
                 }
-                let new_stamp = version(&config);
-                let new_topology = signature(&displays);
-                if player.is_none() || new_stamp != stamp || topology != new_topology {
+                if player.is_none() || new_stamp != stamp || topology != displays {
                     let settings = storage::load()?;
                     drop(player.take());
                     player = Some(Player::open(&settings, &displays)?);
                     stamp = new_stamp;
-                    topology = new_topology;
+                    topology.clone_from(&displays);
                 }
                 player.as_mut().unwrap().update()
             })();
@@ -218,11 +345,21 @@ pub fn run() -> Result<()> {
                 }
             }
         }
-        desktop::dispatch(
+        let event = desktop::dispatch(
+            &[stop.0, open.0],
             next.saturating_duration_since(Instant::now())
                 .as_millis()
                 .min(1000) as u32,
         );
+        if event == WAIT_OBJECT_0 {
+            break;
+        }
+        ensure!(
+            event != WAIT_FAILED,
+            "Cannot wait for tray events: {}",
+            io::Error::last_os_error()
+        );
+        show_editor = event == WAIT_OBJECT_0 + 1;
     }
     Ok(())
 }

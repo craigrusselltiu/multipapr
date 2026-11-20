@@ -164,10 +164,8 @@ pub fn startup(enabled: bool) -> Result<()> {
     }
     Ok(())
 }
-pub fn start(settings: &Settings) -> Result<()> {
+pub fn apply(settings: &Settings) -> Result<()> {
     mpv()?;
     ensure!(settings.media.path.is_file(), "Wallpaper file is missing");
-    save("layout.json", settings)?;
-    command(env::current_exe()?).arg("--background").spawn()?;
-    Ok(())
+    save("layout.json", settings)
 }

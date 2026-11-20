@@ -6,6 +6,7 @@ mod host;
 mod layout;
 mod shader;
 mod storage;
+mod tray;
 
 use anyhow::{Context, Result};
 use std::{env, path::Path};
@@ -18,8 +19,9 @@ fn run() -> Result<()> {
     let mut args = env::args_os().skip(1);
     let arg = args.next();
     match arg.as_deref().and_then(|a| a.to_str()) {
-        None => editor::open(),
-        Some("--background") => host::run(),
+        None => host::run(true),
+        Some("--background") => host::run(false),
+        Some("--editor") => editor::open(),
         Some("--stop") => host::stop(),
         Some("--displays") => {
             println!("{}", serde_json::to_string_pretty(&displays::detect()?)?);
@@ -37,10 +39,11 @@ fn run() -> Result<()> {
                 s.calibration = previous.calibration;
             }
             layout::Layout::new(&displays::detect()?, &s.calibration).cover(&mut s);
-            storage::start(&s)?;
+            storage::apply(&s)?;
             if first {
                 storage::startup(true)?;
             }
+            host::start()?;
             Ok(())
         }
         Some(other) => anyhow::bail!("Unknown option {other}"),
@@ -53,7 +56,9 @@ fn main() {
         if let Ok(dir) = storage::home() {
             let _ = std::fs::write(dir.join("error.txt"), &message);
         }
-        if env::args_os().len() == 1 {
+        if env::args_os().len() == 1
+            || env::args_os().nth(1).as_deref() == Some("--editor".as_ref())
+        {
             rfd::MessageDialog::new()
                 .set_title("Multipapr")
                 .set_description(&message)

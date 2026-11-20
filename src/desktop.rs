@@ -147,14 +147,21 @@ pub fn locked_or_covered(desktop: Rect) -> bool {
             && rect.bottom >= desktop.bottom() as i32
     }
 }
-pub fn dispatch(timeout: u32) {
+pub fn dispatch(handles: &[HANDLE], timeout: u32) -> u32 {
     unsafe {
-        MsgWaitForMultipleObjects(0, null(), 0, timeout, QS_ALLINPUT);
+        let ready = MsgWaitForMultipleObjectsEx(
+            handles.len() as u32,
+            handles.as_ptr(),
+            timeout,
+            QS_ALLINPUT,
+            MWMO_INPUTAVAILABLE,
+        );
         let mut msg: MSG = std::mem::zeroed();
         while PeekMessageW(&mut msg, null_mut(), 0, 0, PM_REMOVE) != 0 {
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
+        ready
     }
 }
 

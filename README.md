@@ -17,9 +17,9 @@ The installer builds the release, places it in `%LOCALAPPDATA%\Multipapr` and ad
 1. Open **Multipapr**, choose a file or drop it onto the canvas. The bright regions show what each panel displays. The dim region shows the rest of the image.
 2. **Native size** maps a source pixel to the primary screen's pixel pitch. A 3840 × 2160 source is twice the width and height of a 1920 × 1080 primary display. **Cover** fills the entire physical arrangement. Drag the picture to move it and drag its bottom-right handle to resize, or enter a scale percentage. Double-click the canvas to frame the whole composition again.
 3. Select a display in the inspector. Panel width and height are the lit dimensions in its current orientation. For side-by-side displays, enter the distance between the lit edges in **Horizontal gap**. **Top offset** is the selected top edge relative to the indicated neighbour, with a negative value above that neighbour. Stacked displays use **Vertical gap** and **Left offset**. Include both bezels and any air space in the gap.
-4. Click **Apply wallpaper**. Close the editor while the background keeps running. **Start at sign-in** restores the saved layout under your account. **Stop wallpaper** reveals the Windows wallpaper underneath. Turn off sign-in startup as well to keep it stopped after a reboot.
+4. Click **Apply wallpaper**. Close the editor to return to the tray and keep the wallpaper running. Click the **Multipapr** tray icon to reopen the editor, or right-click it and choose **Close** to quit and reveal the Windows wallpaper underneath. **Start at sign-in** restores the tray icon and saved layout when you sign in.
 
-Multipapr reads the panel dimensions from EDID and falls back to a 96 DPI estimate for panels without usable size information. Windows supplies the initial alignment. Physical gap defaults to zero. Panels with inaccurate firmware dimensions can be corrected in the inspector.
+Multipapr reads panel dimensions from EDID. When the reported size conflicts with the preferred pixel aspect, it estimates the shorter edge from that aspect. Panels without usable size information use a 96 DPI estimate. Windows supplies the initial alignment and the physical gap starts at zero. You can correct all estimates in the inspector.
 
 ## Playback
 
@@ -36,6 +36,6 @@ multipapr.exe --background
 multipapr.exe --stop
 ```
 
-`--apply` fits a new file to the calibrated display layout. On first use it also enables startup. Run without arguments to open the editor. Build and test with `cargo build --release --locked` and `cargo test --release --locked`.
+`--apply` fits a new file to the calibrated display layout. On first use it also enables startup. Run without arguments to open the editor, or with `--background` to start in the tray. `--stop` quits the tray and wallpaper host. Build and test with `cargo build --release --locked` and `cargo test --release --locked`.
 
 [High-level design](PLAN.md) · [mpv](https://mpv.io/) · [Windows mpv builds](https://github.com/shinchiro/mpv-winbuild-cmake)

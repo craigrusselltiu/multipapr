@@ -6,7 +6,13 @@ use winreg::{RegKey, enums::HKEY_LOCAL_MACHINE};
 fn string(buf: &[u16]) -> String {
     String::from_utf16_lossy(&buf[..buf.iter().position(|&x| x == 0).unwrap_or(buf.len())])
 }
-fn hardware(id: &str) -> Option<(String, [f32; 2])> {
+struct Panel {
+    name: String,
+    size: [f32; 2],
+    estimated: bool,
+}
+
+fn hardware(id: &str) -> Option<Panel> {
     let mut parts = id.trim_start_matches(r"\\?\").split('#');
     let key = format!(
         r"SYSTEM\CurrentControlSet\Enum\{}\{}\{}\Device Parameters",
@@ -26,8 +32,16 @@ fn hardware(id: &str) -> Option<(String, [f32; 2])> {
     let mut size = [data[21] as f32 * 10., data[22] as f32 * 10.];
     let mut name = String::new();
     let mut timing_size = None;
+    let mut native_aspect = None;
     for d in data[54..126].chunks_exact(18) {
         if d[..2] != [0, 0] {
+            if data[24] & 2 != 0 && native_aspect.is_none() {
+                let width = d[2] as u32 | ((d[4] as u32 & 0xf0) << 4);
+                let height = d[5] as u32 | ((d[7] as u32 & 0xf0) << 4);
+                if width > 0 && height > 0 {
+                    native_aspect = Some(width as f32 / height as f32);
+                }
+            }
             let w = d[12] as u32 + ((d[14] as u32 & 0xf0) << 4);
             let h = d[13] as u32 + ((d[14] as u32 & 15) << 8);
             if w > 50 && h > 50 {
@@ -42,7 +56,27 @@ fn hardware(id: &str) -> Option<(String, [f32; 2])> {
     if let Some(s) = timing_size {
         size = s;
     }
-    (size[0] > 0. && size[1] > 0.).then_some((name, size))
+    if size[0] == 0. || size[1] == 0. {
+        return None;
+    }
+    let mut estimated = false;
+    if let Some(aspect) = native_aspect {
+        if (size[0] / size[1] / aspect - 1.).abs() > 0.03 {
+            // Keep the reported long edge and infer the short edge from the
+            // preferred timing, assuming a square-pixel panel.
+            if aspect >= 1. {
+                size[1] = size[0] / aspect;
+            } else {
+                size[0] = size[1] * aspect;
+            }
+            estimated = true;
+        }
+    }
+    Some(Panel {
+        name,
+        size,
+        estimated,
+    })
 }
 
 pub fn detect() -> Result<Vec<Display>> {
@@ -75,21 +109,26 @@ pub fn detect() -> Result<Vec<Display>> {
             if id.is_empty() {
                 id = string(&adapter.DeviceName);
             }
-            let info = hardware(&id);
-            let estimated = info.is_none();
-            let (mut name, mut mm) = info.unwrap_or_else(|| {
-                (
-                    String::new(),
-                    [
+            let state = mode.Anonymous1.Anonymous2;
+            let Panel {
+                mut name,
+                size: mm,
+                estimated,
+            } = if let Some(mut panel) = hardware(&id) {
+                if state.dmDisplayOrientation % 2 == 1 {
+                    panel.size.swap(0, 1);
+                }
+                panel
+            } else {
+                Panel {
+                    name: String::new(),
+                    size: [
                         mode.dmPelsWidth as f32 * 25.4 / 96.,
                         mode.dmPelsHeight as f32 * 25.4 / 96.,
                     ],
-                )
-            });
-            let state = mode.Anonymous1.Anonymous2;
-            if !estimated && state.dmDisplayOrientation % 2 == 1 {
-                mm.swap(0, 1);
-            }
+                    estimated: true,
+                }
+            };
             if name.is_empty() {
                 name = string(&monitor.DeviceString);
             }

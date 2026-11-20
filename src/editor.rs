@@ -1,5 +1,5 @@
 use crate::{
-    displays, host,
+    displays,
     layout::{Display, Layout, Media, Rect as World, Settings},
     storage,
 };
@@ -32,7 +32,7 @@ struct Editor {
     login: bool,
     message: String,
     last_check: Instant,
-    active: bool,
+    playback_error: Option<String>,
 }
 impl Editor {
     fn new(cc: &eframe::CreationContext<'_>, displays: Vec<Display>, settings: Settings) -> Self {
@@ -59,7 +59,7 @@ impl Editor {
             login,
             message: String::new(),
             last_check: Instant::now(),
-            active: host::running(),
+            playback_error: None,
         };
         app.reframe();
         if !app.settings.media.path.as_os_str().is_empty() {
@@ -298,12 +298,6 @@ impl Editor {
                 self.message = e.to_string();
             }
         }
-        if self.active && ui.button("Stop wallpaper").clicked() {
-            match host::stop() {
-                Ok(()) => self.message = "Wallpaper stopped".into(),
-                Err(e) => self.message = e.to_string(),
-            }
-        }
     }
     fn canvas(&mut self, ui: &mut Ui) {
         let (area, response) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
@@ -414,21 +408,16 @@ impl eframe::App for Editor {
     fn update(&mut self, ctx: &Context, _: &mut eframe::Frame) {
         self.collect(ctx);
         if self.last_check.elapsed() >= Duration::from_secs(3) {
-            self.active = host::running();
             if let Ok(d) = displays::detect() {
-                if serde_json::to_vec(&self.displays).ok() != serde_json::to_vec(&d).ok() {
+                if self.displays != d {
                     self.displays = d;
                     self.selected = 0;
                     self.reframe();
                 }
             }
-            if self.active {
-                if let Ok(message) = storage::home()
-                    .and_then(|dir| Ok(std::fs::read_to_string(dir.join("host-error.txt"))?))
-                {
-                    self.message = message;
-                }
-            }
+            self.playback_error = storage::home()
+                .ok()
+                .and_then(|dir| std::fs::read_to_string(dir.join("host-error.txt")).ok());
             self.last_check = Instant::now();
         }
         ctx.request_repaint_after(Duration::from_secs(3));
@@ -462,15 +451,17 @@ impl eframe::App for Editor {
                             .add_enabled(self.texture.is_some() && self.pending.is_none(), btn)
                             .clicked()
                         {
-                            let result = storage::start(&self.settings)
+                            let result = storage::apply(&self.settings)
                                 .and_then(|()| storage::startup(self.login));
                             self.message = match result {
-                                Ok(()) => "Layout applied".into(),
+                                Ok(()) => "Layout saved".into(),
                                 Err(e) => e.to_string(),
                             };
                         }
-                        if !self.message.is_empty() {
-                            ui.label(RichText::new(&self.message).small());
+                        let status = self.playback_error.as_deref().unwrap_or(&self.message);
+                        if !status.is_empty() {
+                            ui.add(Label::new(RichText::new(status).small()).truncate())
+                                .on_hover_text(status);
                         }
                     });
                 });
@@ -496,11 +487,22 @@ pub fn open() -> Result<()> {
             height: 1080,
         })
     });
+    let icon = image::load_from_memory_with_format(
+        include_bytes!("../multipapr.ico"),
+        image::ImageFormat::Ico,
+    )?
+    .into_rgba8();
+    let icon = IconData {
+        width: icon.width(),
+        height: icon.height(),
+        rgba: icon.into_raw(),
+    };
     let options = eframe::NativeOptions {
         viewport: ViewportBuilder::default()
             .with_inner_size([1060., 690.])
             .with_min_inner_size([720., 480.])
-            .with_drag_and_drop(true),
+            .with_drag_and_drop(true)
+            .with_icon(icon),
         ..Default::default()
     };
     eframe::run_native(
