@@ -21,7 +21,11 @@ fn main() {
     println!("cargo:rerun-if-changed=multipapr.ico");
     println!("cargo:rustc-env=MPV_BUILD={MPV_BUILD}");
 
-    let out = PathBuf::from(env::var("OUT_DIR").unwrap());
+    // Cache in the profile directory (target/<profile>), which survives version bumps
+    // that give OUT_DIR a new hash, so mpv is only downloaded and compressed once.
+    let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
+    let out = out_dir.ancestors().nth(3).unwrap().join("mpv-cache");
+    fs::create_dir_all(&out).unwrap();
     let bundle = out.join(format!("mpv-{MPV_BUILD}.zst"));
     if !bundle.is_file() {
         let archive = out.join("mpv.7z");
