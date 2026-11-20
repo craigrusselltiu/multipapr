@@ -41,12 +41,26 @@ try {
         }
     }
     Copy-Item -LiteralPath $binary -Destination $installed -Force
+    $icon = Join-Path $installDir 'fold.ico'
+    Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'multipapr.ico') -Destination $icon -Force
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'assets/fonts/LICENSE.txt') -Destination (Join-Path $installDir 'Inter-LICENSE.txt') -Force
     $programs = [Environment]::GetFolderPath('Programs')
-    $shortcut = (New-Object -ComObject WScript.Shell).CreateShortcut((Join-Path $programs 'Multipapr.lnk'))
+    $link = Join-Path $programs 'Multipapr.lnk'
+    $shortcut = (New-Object -ComObject WScript.Shell).CreateShortcut($link)
     $shortcut.TargetPath = $installed
     $shortcut.WorkingDirectory = $installDir
+    $shortcut.IconLocation = "$icon,0"
     $shortcut.Save()
+    if (-not ('Multipapr.Shell' -as [type])) {
+        Add-Type -Namespace Multipapr -Name Shell -MemberDefinition @'
+[System.Runtime.InteropServices.DllImport("shell32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+public static extern void SHChangeNotify(int change, uint flags, string path, System.IntPtr other);
+'@
+    }
+    # SHCNE_UPDATEITEM with SHCNF_PATHW | SHCNF_FLUSH refreshes these items in Explorer.
+    foreach ($item in $icon, $installed, $link) {
+        [Multipapr.Shell]::SHChangeNotify(0x2000, 0x1005, $item, [IntPtr]::Zero)
+    }
     if ($hosts -and (Test-Path -LiteralPath (Join-Path $installDir 'layout.json'))) {
         Start-Process -FilePath $installed -ArgumentList '--background' -WindowStyle Hidden
     }

@@ -131,9 +131,7 @@ pub fn show(ctx: &Context, brand: TextureId) -> bool {
                 pos2(area.right() - 4. * CONTROL_WIDTH, area.top()),
                 vec2(CONTROL_WIDTH, HEIGHT),
             );
-            let settings = ui
-                .interact(settings_rect, ui.id().with("settings"), Sense::click())
-                .on_hover_text("Settings");
+            let settings = ui.interact(settings_rect, ui.id().with("settings"), Sense::click());
             settings.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, "Settings"));
             if settings.hovered() || settings.has_focus() {
                 draw.rect_filled(settings_rect.shrink2(vec2(5., 7.)), 7, LINE);
@@ -150,9 +148,7 @@ pub fn show(ctx: &Context, brand: TextureId) -> bool {
                     pos2(area.right() - (3 - i) as f32 * CONTROL_WIDTH, area.top()),
                     vec2(CONTROL_WIDTH, HEIGHT),
                 );
-                let response = ui
-                    .interact(r, ui.id().with(i), Sense::click())
-                    .on_hover_text(label);
+                let response = ui.interact(r, ui.id().with(i), Sense::click());
                 response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, label));
                 let c = r.center();
                 let pen = Stroke::new(

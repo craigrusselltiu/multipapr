@@ -115,6 +115,7 @@ impl Editor {
         cc.egui_ctx.set_visuals(visuals);
         cc.egui_ctx.options_mut(|o| o.zoom_with_keyboard = false);
         cc.egui_ctx.style_mut(|s| {
+            s.explanation_tooltips = false;
             s.spacing.item_spacing = vec2(8., 10.);
             s.spacing.interact_size.y = 36.;
             s.spacing.button_padding = vec2(14., 8.);
@@ -232,12 +233,16 @@ impl Editor {
     fn field(
         ui: &mut Ui,
         label: &str,
+        help: Option<&str>,
         value: &mut f32,
         range: std::ops::RangeInclusive<f32>,
         suffix: &str,
     ) -> bool {
         ui.horizontal(|ui| {
             ui.label(RichText::new(label).color(MUTED));
+            if let Some(help) = help {
+                icons::info(ui, help);
+            }
             ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
                 ui.add_sized(
                     [102., 34.],
@@ -288,8 +293,22 @@ impl Editor {
         let d = &self.displays[i];
         let l = self.layout();
         let mut size = [l.panels[i].w, l.panels[i].h];
-        let width = Self::field(ui, "Panel width", &mut size[0], 10.0..=10000.0, " mm");
-        let height = Self::field(ui, "Panel height", &mut size[1], 10.0..=10000.0, " mm");
+        let width = Self::field(
+            ui,
+            "Panel width",
+            Some("Width of the lit screen, excluding the bezel."),
+            &mut size[0],
+            10.0..=10000.0,
+            " mm",
+        );
+        let height = Self::field(
+            ui,
+            "Panel height",
+            Some("Height of the lit screen, excluding the bezel."),
+            &mut size[1],
+            10.0..=10000.0,
+            " mm",
+        );
         if width || height {
             self.settings
                 .calibration
@@ -321,8 +340,22 @@ impl Editor {
             );
         }
         let previous = [x, y];
-        let move_x = Self::field(ui, "Horizontal offset", &mut x, -10000.0..=10000.0, " mm");
-        let move_y = Self::field(ui, "Vertical offset", &mut y, -10000.0..=10000.0, " mm");
+        let move_x = Self::field(
+            ui,
+            "Horizontal offset",
+            Some("Shifts this display left (−) or right (+)."),
+            &mut x,
+            -10000.0..=10000.0,
+            " mm",
+        );
+        let move_y = Self::field(
+            ui,
+            "Vertical offset",
+            Some("Shifts this display up (−) or down (+)."),
+            &mut y,
+            -10000.0..=10000.0,
+            " mm",
+        );
         if move_x || move_y {
             l.move_panel(
                 &self.displays,
@@ -332,11 +365,14 @@ impl Editor {
             );
         }
         ui.add_space(5.);
-        if ui
-            .button("Reset display")
-            .on_hover_text("Use the detected size and placement for this display")
-            .clicked()
-        {
+        let reset = ui
+            .horizontal(|ui| {
+                let reset = ui.button("Reset display").clicked();
+                icons::info(ui, "Restores the detected size and position.");
+                reset
+            })
+            .inner;
+        if reset {
             self.settings.calibration.remove(&d.id);
             self.reframe();
         }
@@ -382,13 +418,12 @@ impl Editor {
         ui.add_space(4.);
         let media = &self.settings.media;
         if let Some(name) = media.path.file_name() {
-            ui.add(Label::new(RichText::new(name.to_string_lossy()).color(MUTED)).wrap())
-                .on_hover_text(media.path.display().to_string());
+            ui.add(Label::new(RichText::new(name.to_string_lossy()).color(MUTED)).wrap());
             resolution(ui, media.width, media.height);
         }
         if self.texture.is_some() {
             let mut percent = self.settings.scale * 100.;
-            if Self::field(ui, "Scale", &mut percent, 1.0..=10000.0, " %") {
+            if Self::field(ui, "Scale", None, &mut percent, 1.0..=10000.0, " %") {
                 self.settings.scale = percent / 100.;
             }
         }

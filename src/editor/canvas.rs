@@ -59,11 +59,7 @@ impl Editor {
                 self.camera.zoom_by(1.25, Vec2::ZERO);
             }
             if ui
-                .add(Button::new("Fit").min_size(vec2(42., 34.)))
-                .on_hover_text(format!(
-                    "Frame all displays and the wallpaper · {:.0}%",
-                    self.camera.zoom * 100.
-                ))
+                .add(Button::new("Reset scale").min_size(vec2(103., 34.)))
                 .clicked()
             {
                 self.reframe();
@@ -134,8 +130,16 @@ impl Editor {
             }
         }
         if let (Some((drag, last)), Some(pointer)) = (self.drag, response.interact_pointer_pos()) {
-            let d = pointer - last;
+            let mut d = pointer - last;
             self.drag = Some((drag, pointer));
+            let modifiers = ui.input(|i| i.modifiers);
+            if modifiers.ctrl && !matches!(drag, Drag::Resize) {
+                if modifiers.shift {
+                    d.x = 0.;
+                } else {
+                    d.y = 0.;
+                }
+            }
             let delta = d / scale;
             match drag {
                 Drag::Pan => {
@@ -212,6 +216,8 @@ impl Editor {
             let selected = self.tool == Tool::Displays && self.selected == i;
             let tint = if selected {
                 ACCENT
+            } else if self.tool == Tool::Wallpaper {
+                Color32::from_white_alpha(65)
             } else {
                 Color32::from_white_alpha(210)
             };
@@ -316,10 +322,11 @@ mod tests {
         );
         editor.tool = Tool::Displays;
         let area = Rect::from_min_size(Pos2::ZERO, vec2(864., 664.));
-        let frame = |editor: &mut Editor, events| {
+        let frame_with_modifiers = |editor: &mut Editor, modifiers, events| {
             let _ = ctx.run(
                 RawInput {
                     screen_rect: Some(area),
+                    modifiers,
                     events,
                     ..Default::default()
                 },
@@ -330,6 +337,8 @@ mod tests {
                 },
             );
         };
+        let frame =
+            |editor: &mut Editor, events| frame_with_modifiers(editor, Modifiers::NONE, events);
         let start = area.center();
         let end = start + vec2(70., -26.);
         let button = |pos, pressed| Event::PointerButton {
@@ -347,7 +356,23 @@ mod tests {
         frame(&mut editor, vec![Event::PointerMoved(end)]);
         let panel = editor.layout().panels[0];
         assert_eq!([panel.x, panel.y], [35., -13.]);
-        frame(&mut editor, vec![button(end, false)]);
+        let right = end + vec2(16., 18.);
+        frame_with_modifiers(
+            &mut editor,
+            Modifiers::CTRL,
+            vec![Event::PointerMoved(right)],
+        );
+        let panel = editor.layout().panels[0];
+        assert_eq!([panel.x, panel.y], [43., -13.]);
+        let down = right + vec2(16., 18.);
+        frame_with_modifiers(
+            &mut editor,
+            Modifiers::CTRL | Modifiers::SHIFT,
+            vec![Event::PointerMoved(down)],
+        );
+        let panel = editor.layout().panels[0];
+        assert_eq!([panel.x, panel.y], [43., -4.]);
+        frame(&mut editor, vec![button(down, false)]);
         let saved = editor.settings.clone();
         let middle = |pos, pressed| Event::PointerButton {
             pos,

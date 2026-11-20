@@ -88,8 +88,17 @@ impl Icon {
             rect.center(),
             if selected { ACCENT } else { MUTED },
         );
-        response
-            .on_hover_text(label)
-            .on_hover_cursor(CursorIcon::PointingHand)
+        response.on_hover_cursor(CursorIcon::PointingHand)
     }
+}
+
+pub(super) fn info(ui: &mut Ui, help: &str) {
+    let (rect, response) = ui.allocate_exact_size(vec2(17., 22.), Sense::hover());
+    let c = rect.center();
+    let tint = if response.hovered() { ACCENT } else { MUTED };
+    let pen = Stroke::new(1.2_f32, tint);
+    ui.painter().circle_stroke(c, 6.2, pen);
+    ui.painter().circle_filled(c - vec2(0., 2.5), 0.9, tint);
+    ui.painter().line_segment([c, c + vec2(0., 3.)], pen);
+    response.on_hover_text(help);
 }
