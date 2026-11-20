@@ -43,9 +43,7 @@ Windows spans a wallpaper by **pixels**. Put a 27" 1440p screen beside a 24" 108
 irm https://raw.githubusercontent.com/craigrusselltiu/multipapr/main/install.ps1 | iex
 ```
 
-Playback uses [mpv](https://mpv.io/), which is built into the exe and unpacked once on first use. No other downloads are needed. Requires Windows 10 or 11 on x64.
-
-## How it works
+## Summary
 
 <p align="center">
   <picture>
@@ -69,9 +67,11 @@ Playback uses [mpv](https://mpv.io/), which is built into the exe and unpacked o
   <tr><td><b>Startup</b></td><td>Toggle <b>Start at sign-in</b> from the settings cog.</td></tr>
 </table>
 
-## Light on resources
+## Lightweight
 
 > [!NOTE]
+> Playback uses [mpv](https://mpv.io/), which is built into the exe and unpacked once on first use.
+>
 > A single mpv instance decodes the video once, on the GPU where possible, and one shader maps it to every display. Audio, interpolation and network caching are off. Playback **pauses** when the desktop is locked or a fullscreen window covers it, and it recovers after Explorer restarts or displays change. A still image renders once and then stays idle.
 
 ## Command line
@@ -83,7 +83,7 @@ multipapr.exe --stop                              # stop the wallpaper and quit
 multipapr.exe --displays                          # print detected displays as JSON
 ```
 
-Settings, previews and logs live in `%LOCALAPPDATA%\Multipapr`. Your media stays where it is, so keep it available at sign-in.
+Settings, previews and logs live in `%LOCALAPPDATA%\Multipapr`.
 
 <details>
 <summary><b>Build from source</b></summary>
@@ -104,3 +104,7 @@ cargo test --release --locked
 - If a monitor reports no physical size, Multipapr assumes 96 DPI. You can correct it under **Advanced**.
 
 </details>
+
+## License
+
+[MIT](LICENSE). The release exe bundles [mpv](https://mpv.io/), which is GPL-licensed. See [third-party notices](THIRD-PARTY-NOTICES.md).

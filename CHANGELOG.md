@@ -11,6 +11,10 @@ All notable changes to this project are documented here. The format follows [Kee
 - Importing a video starts mpv once instead of twice.
 - The sidebar shows "Running first-time setup…" while setup runs.
 
+### Added
+
+- MIT license for Multipapr, plus third-party notices and the GPL text for the bundled mpv.
+
 ## v0.1.1
 
 ### Changed

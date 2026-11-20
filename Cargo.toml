@@ -3,6 +3,7 @@ name = "multipapr"
 version = "0.1.2"
 edition = "2024"
 description = "Physically aligned panoramic wallpapers for Windows"
+license = "MIT"
 
 [dependencies]
 anyhow = "1"
