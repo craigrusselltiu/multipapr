@@ -182,7 +182,11 @@ impl Editor {
         self.new_source = new_source;
         let (tx, rx) = channel();
         self.pending = Some(rx);
-        self.message.clear();
+        self.message = if storage::mpv().is_err() {
+            "Downloading mpv for wallpaper playback…".into()
+        } else {
+            String::new()
+        };
         let ctx = ctx.clone();
         std::thread::spawn(move || {
             let result = (|| {
@@ -214,6 +218,7 @@ impl Editor {
         self.pending = None;
         match result {
             Ok(i) => {
+                self.message.clear();
                 self.settings.media = i.media;
                 if self.new_source {
                     self.settings.scale = 1.;

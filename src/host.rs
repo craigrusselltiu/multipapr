@@ -218,7 +218,7 @@ impl Player {
         let surface = Surface::create(layout.desktop)?;
         let pipe = player_pipe(std::process::id());
         let log = fs::File::create(dir.join("player.log"))?;
-        let mut command = storage::command(storage::mpv()?);
+        let mut command = storage::command(storage::ensure_mpv()?);
         command
             .args([
                 "--no-config",

@@ -1,42 +1,106 @@
-# Multipapr
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/readme/logo-dark.png">
+    <img src="assets/readme/logo-light.png" alt="Multipapr" width="380">
+  </picture>
+</p>
 
-A Windows wallpaper editor for desks with mixed display sizes, densities and orientations. Play one silent, looping video across the desktop or use a static image. The editor and wallpaper host share a layout measured in millimetres.
+<p align="center">
+  <b>One wallpaper. Every monitor. Lined up like a single window onto your desk.</b><br>
+  Live MP4 and still-image wallpapers for Windows, mapped in real millimetres across mixed monitors.
+</p>
+
+<p align="center">
+  <a href="https://github.com/craigrusselltiu/multipapr/releases/latest"><img src="https://img.shields.io/github/v/release/craigrusselltiu/multipapr?style=flat-square&color=c1bbfc&label=download" alt="Download"></a>
+  <img src="https://img.shields.io/badge/Windows-10%20%7C%2011-2c2c32?style=flat-square" alt="Windows 10 and 11">
+  <img src="https://img.shields.io/badge/built%20with-Rust-2c2c32?style=flat-square" alt="Rust">
+</p>
+
+---
+
+Windows spans a wallpaper by **pixels**. Put a 27" 1440p screen beside a 24" 1080p screen and the image changes size at the seam, skips over the bezels and drifts out of line. Multipapr maps it by **physical size** instead, so a line that leaves one monitor comes out of the next one at the right height and scale.
+
+<table>
+  <tr>
+    <th>In Multipapr</th>
+    <th>On the desk</th>
+  </tr>
+  <tr>
+    <td><img src="assets/readme/demo-app.gif" alt="Resizing the wallpaper and moving display 2 in the Multipapr editor"></td>
+    <td><img src="assets/readme/demo-irl.gif" alt="The same wallpaper playing across a landscape and a portrait monitor"></td>
+  </tr>
+</table>
+
+<sub>Left: a recording of the editor. Right: the same frames played on a 27" 1440p landscape monitor and a 24" 1080p portrait monitor. Dragging display 2 to where it sits on the desk closes the seam.</sub>
 
 ## Install
 
-Install Rust and FFmpeg with both `ffmpeg.exe` and `ffprobe.exe` on PATH. From the repository, run:
+**Download:** grab [`multipapr.exe`](https://github.com/craigrusselltiu/multipapr/releases/latest/download/multipapr.exe) and run it. There's nothing else to install.
+
+**Or run one command** in PowerShell to install it with a Start menu entry:
 
 ```powershell
-.\install.ps1
+irm https://raw.githubusercontent.com/craigrusselltiu/multipapr/main/install.ps1 | iex
 ```
 
-The installer builds the release, places it in `%LOCALAPPDATA%\Multipapr` and adds **Multipapr** to Start. On x64 Windows it downloads a checksum-verified portable mpv build if needed. An existing mpv on PATH also works. FFmpeg is used when importing media and generating the editor thumbnail.
+The first time you set a wallpaper, Multipapr downloads a checksum-verified portable [mpv](https://mpv.io/) for playback. Requires Windows 10 or 11 on x64.
 
-## Arrange a wallpaper
+## How it works
 
-1. Open **Multipapr**, choose a file or drop it onto the canvas. The bright regions show what each panel displays. The dim region shows the rest of the image.
-2. Use the image icon to edit the wallpaper. **Fill** centres the image at native size. At that scale, a 3840 × 2160 image is twice the width and height of a 1920 × 1080 primary display. **Fit** beside **Fill** covers the physical arrangement. Drag the image to move it or drag its bottom-right handle to resize it.
-3. Use the monitor icon to select and move a display. Multipapr starts from the Windows arrangement and remembers your physical positions by monitor ID. The wallpaper updates during the drag and saves on release. Open **Advanced** for panel dimensions and offsets in millimetres. Positive horizontal and vertical offsets move right and down. For adjacent displays, zero on the joining axis puts their lit edges together. Include both bezels and any air gap in your measurement.
-4. Drag empty canvas or middle-drag anywhere to pan. Hold **Ctrl** while dragging to move horizontally, or **Ctrl + Shift** to move vertically. The wheel zooms around the pointer. **Reset scale** beside the zoom buttons frames the whole canvas.
-5. Open the settings cog to change **Start at sign-in**. Close the editor to keep the wallpaper running in the tray. Click the tray icon to reopen the editor or right-click it and choose **Close** to quit.
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/readme/diagram-dark.png">
+    <img src="assets/readme/diagram-light.png" alt="Pixel spanning versus physical spanning" width="100%">
+  </picture>
+</p>
 
-Multipapr reads panel dimensions from EDID. When the reported size conflicts with the preferred pixel aspect, it estimates the shorter edge from that aspect. Panels without usable size information use a 96 DPI estimate. Windows supplies the initial alignment and the physical gap starts at zero. You can correct all estimates in the inspector.
+> [!TIP]
+> **Measure once.** Multipapr reads each panel's size from the monitor. Drag a display to where it actually sits, or type the gap in millimetres under **Advanced**. Include both bezels and any air gap.
 
-## Playback
+1. **Choose a file:** an MP4, MOV, MKV or WebM video, or a PNG, JPEG, WebP or BMP image. You can also drop it onto the canvas.
+2. **Frame it.** Drag the wallpaper to move it and drag its corner to resize it. **Fill** shows it at native size, so a 4K image appears twice the size of a 1080p panel. **Fit** covers every display.
+3. **Line up the displays.** Use the monitor tool to drag each display into place. The wallpaper on your desktop updates as you drag.
+4. **Close the window.** The wallpaper keeps playing from the tray and starts again when you sign in.
 
-The wallpaper host attaches a child window behind Explorer's desktop icons. One mpv instance decodes the media and a GPU shader maps it to each display. Hardware decoding is requested when available. Video plays at the source cadence with interpolation, audio and network caching disabled. A still image holds one frame. The editor loads a bounded, cached preview. The host pauses on a locked desktop or when the foreground window covers the complete desktop, and restores the surface after Explorer or monitor changes.
+| | |
+|---|---|
+| **Pan / zoom** | Drag empty canvas or middle-drag. Scroll to zoom. **Reset scale** reframes. |
+| **Lock an axis** | Hold <kbd>Ctrl</kbd> to drag horizontally, <kbd>Ctrl</kbd>+<kbd>Shift</kbd> for vertically. |
+| **Tray** | Click to reopen the editor. Right-click → **Close** to stop the wallpaper. |
+| **Startup** | Toggle **Start at sign-in** from the settings cog. |
 
-Media stays at its original path. Settings, cached previews and diagnostic logs live in `%LOCALAPPDATA%\Multipapr`. Keep the selected file accessible at sign-in. Explorer's wallpaper window hierarchy is an undocumented Windows interface and can change across Windows versions.
+## Light on resources
+
+> [!NOTE]
+> A single mpv instance decodes the video once, on the GPU where possible, and one shader maps it to every display. Audio, interpolation and network caching are off. Playback **pauses** when the desktop is locked or a fullscreen window covers it, and it recovers after Explorer restarts or displays change. A still image renders once and then stays idle.
 
 ## Command line
 
 ```powershell
-multipapr.exe --apply "C:\Media\wallpaper.mp4"
-multipapr.exe --displays
-multipapr.exe --background
-multipapr.exe --stop
+multipapr.exe --apply "D:\Wallpapers\loop.mp4"   # fit a file to your displays and start it
+multipapr.exe --background                        # start in the tray
+multipapr.exe --stop                              # stop the wallpaper and quit
+multipapr.exe --displays                          # print detected displays as JSON
 ```
 
-`--apply` fits a new file to the calibrated display layout. On first use it also enables startup. Run without arguments to open the editor, or with `--background` to start in the tray. `--stop` quits the tray and wallpaper host. Build and test with `cargo build --release --locked` and `cargo test --release --locked`.
+Settings, previews and logs live in `%LOCALAPPDATA%\Multipapr`. Your media stays where it is, so keep it available at sign-in.
 
-[mpv](https://mpv.io/) · [Windows mpv builds](https://github.com/shinchiro/mpv-winbuild-cmake)
+<details>
+<summary><b>Build from source</b></summary>
+
+```powershell
+git clone https://github.com/craigrusselltiu/multipapr
+cd multipapr
+cargo test --release --locked
+.\install.ps1 -FromSource
+```
+
+</details>
+
+<details>
+<summary><b>Known limits</b></summary>
+
+- Multipapr places its wallpaper window behind the desktop icons using a part of Explorer that Windows doesn't document, so a future Windows update could break it.
+- If a monitor reports no physical size, Multipapr assumes 96 DPI. You can correct it under **Advanced**.
+
+</details>

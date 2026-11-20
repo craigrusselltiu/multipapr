@@ -7,7 +7,7 @@ description = "Physically aligned panoramic wallpapers for Windows"
 [dependencies]
 anyhow = "1"
 eframe = { version = "0.31.1", default-features = false, features = ["default_fonts", "glow"] }
-image = { version = "0.25", default-features = false, features = ["ico", "png", "jpeg"] }
+image = { version = "0.25", default-features = false, features = ["ico", "png", "jpeg", "bmp", "gif", "webp"] }
 rfd = "0.15"
 raw-window-handle = "0.6"
 serde = { version = "1", features = ["derive"] }
