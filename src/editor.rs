@@ -542,6 +542,10 @@ impl eframe::App for Editor {
     }
 }
 pub fn open() -> Result<()> {
+    if storage::mpv().is_err() {
+        // First run: set up mpv while the window opens and the user picks a wallpaper.
+        std::thread::spawn(storage::warm_up_mpv);
+    }
     let displays = displays::detect()?;
     let settings = storage::load().unwrap_or_else(|_| {
         Settings::new(Media {

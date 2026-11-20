@@ -6,7 +6,7 @@ use anyhow::{Context, Result, ensure};
 use image::{DynamicImage, ImageFormat, ImageReader, imageops::FilterType};
 use std::{
     env, fs,
-    io::Write,
+    io::{self, Read, Write},
     os::windows::process::CommandExt,
     path::{Path, PathBuf},
     process::Command,
@@ -96,10 +96,34 @@ pub fn ensure_mpv() -> Result<PathBuf> {
     let staging = dir.with_extension("partial");
     let _ = fs::remove_dir_all(&staging);
     let _ = fs::remove_dir_all(&dir);
-    sevenz_rust2::decompress(std::io::Cursor::new(mpv_archive()?), &staging)
-        .context("Cannot unpack the bundled mpv")?;
+    unpack(mpv_archive()?, &staging).context("Cannot unpack the bundled mpv")?;
     fs::rename(&staging, &dir)?;
     mpv()
+}
+// Unpack mpv and run it once, so the antivirus scan of the new executable happens now
+// rather than when the first wallpaper loads.
+pub fn warm_up_mpv() {
+    if let Ok(mpv) = ensure_mpv() {
+        let _ = command(mpv).arg("--version").output();
+    }
+}
+// The bundle is a zstd stream of: file count, then per file its name, size and bytes.
+fn unpack(bundle: &[u8], dest: &Path) -> Result<()> {
+    fs::create_dir_all(dest)?;
+    let mut z = zstd::Decoder::with_buffer(bundle)?;
+    z.window_log_max(31)?;
+    let mut u32_buf = [0u8; 4];
+    z.read_exact(&mut u32_buf)?;
+    for _ in 0..u32::from_le_bytes(u32_buf) {
+        z.read_exact(&mut u32_buf)?;
+        let mut name = vec![0; u32::from_le_bytes(u32_buf) as usize];
+        z.read_exact(&mut name)?;
+        let mut size = [0u8; 8];
+        z.read_exact(&mut size)?;
+        let mut file = fs::File::create(dest.join(String::from_utf8(name)?))?;
+        io::copy(&mut (&mut z).take(u64::from_le_bytes(size)), &mut file)?;
+    }
+    Ok(())
 }
 pub fn save<T: serde::Serialize>(name: &str, value: &T) -> Result<()> {
     let dir = home()?;
@@ -123,27 +147,48 @@ fn parse_mpv_dimensions(stdout: &[u8]) -> Option<(u32, u32)> {
         (w > 0 && h > 0).then_some((w, h))
     })
 }
+// One mpv run reads the video size and saves the editor preview frame.
 fn probe_with_mpv(path: &Path) -> Result<(u32, u32)> {
     let dir = home()?;
     let script = dir.join("probe.lua");
     fs::write(&script, include_bytes!("../assets/probe.lua"))?;
+    let temp = tempfile::tempdir_in(&dir)?;
     let out = command(ensure_mpv()?)
         .args([
             "--no-config",
             "--terminal=yes",
             "--msg-level=all=no,probe=info",
-            "--vo=null",
+            "--vo=image",
+            "--vo-image-format=jpg",
+            "--vo-image-jpeg-quality=85",
+            "--vf=lavfi=[scale=1280:960:force_original_aspect_ratio=decrease]",
+            "--frames=1",
             "--ao=null",
             "--no-audio",
             "--no-sub",
             "--image-display-duration=0",
         ])
         .arg(format!("--script={}", script.display()))
+        .arg(format!("--vo-image-outdir={}", temp.path().display()))
         .arg("--")
         .arg(path)
         .output()
         .context("Cannot probe media with mpv")?;
-    parse_mpv_dimensions(&out.stdout).context("Cannot read this media file")
+    let size = parse_mpv_dimensions(&out.stdout).context("Cannot read this media file")?;
+    if let Some(frame) = fs::read_dir(temp.path())?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .find(|p| p.extension().and_then(|e| e.to_str()) == Some("jpg"))
+    {
+        fs::rename(frame, preview_path(path)?)?;
+    }
+    Ok(size)
+}
+fn preview_path(media: &Path) -> Result<PathBuf> {
+    use std::hash::{DefaultHasher, Hash, Hasher};
+    let mut hash = DefaultHasher::new();
+    media.hash(&mut hash);
+    fs::metadata(media)?.modified()?.hash(&mut hash);
+    Ok(home()?.join(format!("preview-{:016x}.jpg", hash.finish())))
 }
 pub fn probe(path: &Path) -> Result<Media> {
     let path = fs::canonicalize(path).context("Cannot open the selected file")?;
@@ -178,59 +223,22 @@ fn dunce_path(path: &Path) -> PathBuf {
         .unwrap_or_else(|| path.into())
 }
 pub fn preview(media: &Media) -> Result<image::RgbaImage> {
-    use std::hash::{DefaultHasher, Hash, Hasher};
-    let mut hash = DefaultHasher::new();
-    media.path.hash(&mut hash);
-    fs::metadata(&media.path)?.modified()?.hash(&mut hash);
-    let dir = home()?;
-    let path = dir.join(format!("preview-{:016x}.jpg", hash.finish()));
+    let path = preview_path(&media.path)?;
     if let Ok(image) = image::open(&path) {
         return Ok(image.into_rgba8());
     }
-    if let Ok(reader) = ImageReader::open(&media.path).and_then(|r| r.with_guessed_format()) {
-        if let Ok(decoded) = reader.decode() {
-            let scaled = if decoded.width() > 1280 || decoded.height() > 960 {
-                decoded.resize(1280, 960, FilterType::Triangle)
-            } else {
-                decoded
-            };
-            let _ = DynamicImage::ImageRgb8(scaled.to_rgb8())
-                .save_with_format(&path, ImageFormat::Jpeg);
-            return Ok(scaled.into_rgba8());
-        }
-    }
-    let temp = tempfile::tempdir_in(&dir)?;
-    let out = command(ensure_mpv()?)
-        .args([
-            "--no-config",
-            "--vo=image",
-            "--vo-image-format=jpg",
-            "--vo-image-jpeg-quality=85",
-            "--vf=lavfi=[scale=1280:960:force_original_aspect_ratio=decrease]",
-            "--frames=1",
-            "--no-audio",
-            "--no-sub",
-            "--image-display-duration=0",
-            "--msg-level=all=error",
-        ])
-        .arg(format!("--vo-image-outdir={}", temp.path().display()))
-        .arg("--")
-        .arg(&media.path)
-        .output()
-        .context("Cannot generate media preview with mpv")?;
-    ensure!(
-        out.status.success(),
-        "Preview failed: {}",
-        String::from_utf8_lossy(&out.stderr).trim()
-    );
-    let frame = fs::read_dir(temp.path())?
-        .filter_map(|e| e.ok().map(|e| e.path()))
-        .find(|p| p.extension().and_then(|e| e.to_str()) == Some("jpg"))
-        .context("Preview did not produce a frame")?;
-    let bytes = fs::read(&frame)?;
-    let image = image::load_from_memory(&bytes)?.into_rgba8();
-    let _ = fs::write(&path, bytes);
-    Ok(image)
+    // Videos get their preview frame from probe(); only still images reach this point.
+    let decoded = ImageReader::open(&media.path)?
+        .with_guessed_format()?
+        .decode()
+        .context("Cannot preview this media file")?;
+    let scaled = if decoded.width() > 1280 || decoded.height() > 960 {
+        decoded.resize(1280, 960, FilterType::Triangle)
+    } else {
+        decoded
+    };
+    let _ = DynamicImage::ImageRgb8(scaled.to_rgb8()).save_with_format(&path, ImageFormat::Jpeg);
+    Ok(scaled.into_rgba8())
 }
 const RUN: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
 pub fn startup_enabled() -> bool {

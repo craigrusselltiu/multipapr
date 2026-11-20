@@ -2,6 +2,15 @@
 
 All notable changes to this project are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## v0.1.2
+
+### Changed
+
+- First-time setup is much faster. The bundled mpv is stored as zstd and unpacks in about half a second instead of 2.5 seconds.
+- Setup starts in the background as soon as the app opens, and mpv runs once ahead of time, so a new user's first wallpaper loads in under half a second.
+- Importing a video starts mpv once instead of twice.
+- The sidebar shows "Running first-time setup…" while setup runs.
+
 ## v0.1.1
 
 ### Changed
