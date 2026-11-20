@@ -8,3 +8,7 @@ Build a Windows wallpaper editor and a quiet, per-user wallpaper host in Rust.
 4. Use a separate lightweight host attached to Explorer behind the icons. Decode the source once with mpv and map it onto all monitor rectangles in one GPU shader. Loop silently, prefer hardware decoding, avoid continuous work for photos and pause when the desktop is locked or fully covered by a fullscreen app.
 5. Make the system tray the app's home. Start quietly at sign-in with one tray icon and the saved wallpaper. Left-click the icon to open or focus the editor. Closing the editor window returns to the tray and keeps playback running. Right-click the icon and choose **Close** to stop playback, remove the tray icon and exit Multipapr. Preserve the sign-in preference for the next session. Restore the icon and wallpaper after Explorer restarts. Keep user media and machine-specific settings outside Git.
 6. Verify geometry with deterministic tests, build and exercise the release on the actual displays, then apply the supplied UHD clip and publish the source.
+
+## Editor refinement
+
+Use one draggable app bar with native window actions and rounded desktop-window corners. Keep the wallpaper visible in a large canvas. A compact toolbar selects Wallpaper, Displays or Pan. Keep image placement, physical display calibration and the temporary camera transform independent. Wheel zoom stays anchored to the pointer and Fit view restores the composition. Publish the logo candidates for selection before changing the app icon.

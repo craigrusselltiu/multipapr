@@ -1405,6 +1405,7 @@ dependencies = [
  "anyhow",
  "eframe",
  "image",
+ "raw-window-handle",
  "rfd",
  "serde",
  "serde_json",

@@ -11,7 +11,7 @@ use std::{
     io::{self, Write},
     os::windows::io::AsRawHandle,
     path::{Path, PathBuf},
-    process::{Child, Command},
+    process::{Child, Command, Stdio},
     ptr::{null, null_mut},
     time::{Duration, Instant, SystemTime},
 };
@@ -118,9 +118,12 @@ impl EditorProcess {
                 return Ok(());
             }
         }
-        let editor =
-            ManagedChild::spawn(storage::command(std::env::current_exe()?).arg("--editor"))
-                .context("Cannot open Multipapr editor")?;
+        let editor = ManagedChild::spawn(
+            storage::command(std::env::current_exe()?)
+                .arg("--editor")
+                .arg(std::process::id().to_string()),
+        )
+        .context("Cannot open Multipapr editor")?;
         unsafe {
             AllowSetForegroundWindow(editor.child.id());
         }
@@ -182,7 +185,22 @@ fn editor_window(pid: u32) -> HWND {
     search.hwnd
 }
 
+pub fn player_pipe(host_id: u32) -> PathBuf {
+    PathBuf::from(format!(r"\\.\pipe\multipapr-player-{host_id}"))
+}
+
+pub fn update_mapping(pipe: &Path, layout: &Layout, settings: &Settings) -> Result<()> {
+    let mut ipc = fs::OpenOptions::new().read(true).write(true).open(pipe)?;
+    writeln!(
+        ipc,
+        "{}",
+        serde_json::json!({"command":["set_property","glsl-shader-opts", shader::parameters(layout, settings)]})
+    )?;
+    Ok(())
+}
+
 struct Player {
+    media: PathBuf,
     process: ManagedChild,
     surface: Surface,
     pipe: PathBuf,
@@ -194,9 +212,10 @@ impl Player {
         let layout = Layout::new(displays, &settings.calibration);
         let dir = storage::home()?;
         let shader_path = dir.join("layout.glsl");
-        fs::write(&shader_path, shader::generate(displays, &layout, settings))?;
+        fs::write(&shader_path, shader::generate(displays, &layout))?;
         let surface = Surface::create(layout.desktop)?;
-        let pipe = PathBuf::from(format!(r"\\.\pipe\multipapr-player-{}", std::process::id()));
+        let pipe = player_pipe(std::process::id());
+        let log = fs::File::create(dir.join("player.log"))?;
         let mut command = storage::command(storage::mpv()?);
         command
             .args([
@@ -215,7 +234,9 @@ impl Player {
                 "--no-input-default-bindings",
                 "--input-vo-keyboard=no",
                 "--input-cursor=no",
-                "--no-terminal",
+                "--terminal=yes",
+                "--input-terminal=no",
+                "--term-status-msg=",
                 "--osd-level=0",
                 "--cache=no",
                 "--interpolation=no",
@@ -223,13 +244,20 @@ impl Player {
             ])
             .arg(format!("--wid={}", surface.hwnd as usize))
             .arg(format!("--glsl-shader={}", shader_path.display()))
+            .arg(format!(
+                "--glsl-shader-opts={}",
+                shader::parameters(&layout, settings)
+            ))
             .arg(format!("--input-ipc-server={}", pipe.display()))
-            .arg(format!("--log-file={}", dir.join("player.log").display()))
+            .stdin(Stdio::null())
+            .stdout(log.try_clone()?)
+            .stderr(log)
             .arg("--msg-level=all=warn")
             .arg("--")
             .arg(&settings.media.path);
         let process = ManagedChild::spawn(&mut command).context("Cannot launch mpv")?;
         Ok(Self {
+            media: settings.media.path.clone(),
             process,
             surface,
             pipe,
@@ -319,8 +347,23 @@ pub fn run(mut show_editor: bool) -> Result<()> {
                 }
                 if player.is_none() || new_stamp != stamp || topology != displays {
                     let settings = storage::load()?;
-                    drop(player.take());
-                    player = Some(Player::open(&settings, &displays)?);
+                    if settings.media.path.as_os_str().is_empty() {
+                        drop(player.take());
+                        return Ok(());
+                    }
+                    if let Some(current) = player
+                        .as_ref()
+                        .filter(|p| topology == displays && p.media == settings.media.path)
+                    {
+                        update_mapping(
+                            &current.pipe,
+                            &Layout::new(&displays, &settings.calibration),
+                            &settings,
+                        )?;
+                    } else {
+                        drop(player.take());
+                        player = Some(Player::open(&settings, &displays)?);
+                    }
                     stamp = new_stamp;
                     topology.clone_from(&displays);
                 }
