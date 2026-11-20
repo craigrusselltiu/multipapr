@@ -1,6 +1,6 @@
 # Multipapr logo concepts
 
-Seam is the selected app and system tray icon.
+Fold is the selected app and system tray icon. The production mark uses the lavender app accent on a transparent background.
 
 | Seam | Fold | Ripple |
 | --- | --- | --- |

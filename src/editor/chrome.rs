@@ -1,4 +1,4 @@
-use super::{LINE, MUTED, PANEL};
+use super::{LINE, MUTED, PANEL, icons::Icon};
 use eframe::egui::*;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use windows_sys::Win32::{
@@ -7,7 +7,7 @@ use windows_sys::Win32::{
     UI::{HiDpi::GetDpiForWindow, Shell::*, WindowsAndMessaging::*},
 };
 
-const HEIGHT: f32 = 46.;
+const HEIGHT: f32 = 50.;
 const CONTROL_WIDTH: f32 = 46.;
 
 pub fn install(cc: &eframe::CreationContext<'_>) {
@@ -70,7 +70,7 @@ unsafe extern "system" fn window_proc(
                 }
             }
             if pt.y < (HEIGHT * dpi) as i32
-                && pt.x < client.right - (3. * CONTROL_WIDTH * dpi) as i32
+                && pt.x < client.right - (4. * CONTROL_WIDTH * dpi) as i32
             {
                 return HTCAPTION as isize;
             }
@@ -101,31 +101,44 @@ unsafe extern "system" fn window_proc(
     }
 }
 
-pub fn show(ctx: &Context, brand: TextureId) {
+pub fn show(ctx: &Context, brand: TextureId) -> bool {
     TopBottomPanel::top("app bar")
         .exact_height(HEIGHT)
         .frame(Frame::new().fill(PANEL))
         .show(ctx, |ui| {
-            let area = ui.max_rect();
+            let (area, _) =
+                ui.allocate_exact_size(vec2(ui.available_width(), HEIGHT), Sense::hover());
             let draw = ui.painter().clone();
             draw.image(
                 brand,
-                Rect::from_center_size(area.left_center() + vec2(26., 0.), Vec2::splat(23.)),
+                Rect::from_center_size(area.left_center() + vec2(33., 0.), Vec2::splat(36.)),
                 Rect::from_min_max(Pos2::ZERO, pos2(1., 1.)),
                 Color32::WHITE,
             );
-            draw.text(
-                area.left_center() + vec2(48., 0.),
-                Align2::LEFT_CENTER,
-                "Multipapr",
-                FontId::proportional(17.),
-                Color32::WHITE,
+            let title =
+                draw.layout_no_wrap("Multipapr".into(), super::heading_font(17.), Color32::WHITE);
+            let title_origin = pos2(
+                area.left() + 61.,
+                area.center().y - title.mesh_bounds.center().y,
             );
+            draw.galley(title_origin, title, Color32::WHITE);
             draw.hline(
                 area.x_range(),
                 area.bottom() - 0.5,
                 Stroke::new(1.0_f32, LINE),
             );
+            let settings_rect = Rect::from_min_size(
+                pos2(area.right() - 4. * CONTROL_WIDTH, area.top()),
+                vec2(CONTROL_WIDTH, HEIGHT),
+            );
+            let settings = ui
+                .interact(settings_rect, ui.id().with("settings"), Sense::click())
+                .on_hover_text("Settings");
+            settings.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, "Settings"));
+            if settings.hovered() || settings.has_focus() {
+                draw.rect_filled(settings_rect.shrink2(vec2(5., 7.)), 7, LINE);
+            }
+            Icon::Cog.paint(&draw, settings_rect.center(), MUTED);
             let maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
             let labels = [
                 "Minimise",
@@ -135,7 +148,7 @@ pub fn show(ctx: &Context, brand: TextureId) {
             for (i, label) in labels.into_iter().enumerate() {
                 let r = Rect::from_min_size(
                     pos2(area.right() - (3 - i) as f32 * CONTROL_WIDTH, area.top()),
-                    vec2(CONTROL_WIDTH, HEIGHT - 1.),
+                    vec2(CONTROL_WIDTH, HEIGHT),
                 );
                 let response = ui
                     .interact(r, ui.id().with(i), Sense::click())
@@ -199,7 +212,9 @@ pub fn show(ctx: &Context, brand: TextureId) {
                     });
                 }
             }
-        });
+            settings.clicked()
+        })
+        .inner
 }
 
 #[cfg(test)]
@@ -209,6 +224,7 @@ mod tests {
     #[test]
     fn caption_buttons_request_the_correct_window_action() {
         let ctx = Context::default();
+        super::super::set_fonts(&ctx);
         let run = |events, maximized| {
             let mut input = RawInput {
                 screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(900., 600.))),
@@ -220,7 +236,9 @@ mod tests {
                 .get_mut(&ViewportId::ROOT)
                 .unwrap()
                 .maximized = Some(maximized);
-            ctx.run(input, |ctx| show(ctx, TextureId::default()))
+            ctx.run(input, |ctx| {
+                show(ctx, TextureId::default());
+            })
         };
         for (column, maximized, expected) in [
             (0, false, ViewportCommand::Minimized(true)),

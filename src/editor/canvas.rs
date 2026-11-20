@@ -1,4 +1,4 @@
-use super::{ACCENT, Editor, FIELD, INK, LINE, MUTED, PANEL};
+use super::{ACCENT, Editor, INK, PANEL, icons::Icon};
 use crate::layout::Rect as World;
 use eframe::egui::*;
 
@@ -6,7 +6,6 @@ use eframe::egui::*;
 pub(super) enum Tool {
     Wallpaper,
     Displays,
-    Pan,
 }
 #[derive(Copy, Clone)]
 pub(super) enum Drag {
@@ -50,64 +49,40 @@ fn screen_rect(origin: Pos2, scale: f32, world: World) -> Rect {
     )
 }
 impl Editor {
-    pub(super) fn toolbar(&mut self, ui: &mut Ui) {
-        Frame::new()
-            .fill(INK)
-            .inner_margin(Margin::symmetric(12, 10))
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 3.;
-                    for (tool, title, hint) in [
-                        (Tool::Wallpaper, "Wallpaper", "Move or resize the wallpaper"),
-                        (Tool::Displays, "Displays", "Move and calibrate a display"),
-                        (Tool::Pan, "Pan", "Drag to pan the canvas"),
-                    ] {
-                        let selected = self.tool == tool;
-                        let b = Button::new(RichText::new(title).color(if selected {
-                            Color32::WHITE
-                        } else {
-                            MUTED
-                        }))
-                        .corner_radius(6)
-                        .stroke(Stroke::NONE);
-                        let b = b.fill(if selected { FIELD } else { INK });
-                        let width = match tool {
-                            Tool::Wallpaper => 84.,
-                            Tool::Displays => 72.,
-                            Tool::Pan => 48.,
-                        };
-                        if ui
-                            .add_sized([width, 28.], b)
-                            .on_hover_text(hint)
-                            .on_hover_cursor(CursorIcon::PointingHand)
-                            .clicked()
-                        {
-                            self.tool = tool;
-                        }
-                    }
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if ui
-                            .button("Fit view")
-                            .on_hover_text("Frame the entire arrangement")
-                            .clicked()
-                        {
-                            self.reframe();
-                        }
-                        if ui.button("+").on_hover_text("Zoom in").clicked() {
-                            self.camera.zoom_by(1.25, Vec2::ZERO);
-                        }
-                        ui.label(
-                            RichText::new(format!("{:.0}%", self.camera.zoom * 100.))
-                                .monospace()
-                                .size(12.)
-                                .color(MUTED),
-                        );
-                        if ui.button("−").on_hover_text("Zoom out").clicked() {
-                            self.camera.zoom_by(0.8, Vec2::ZERO);
-                        }
-                    });
-                });
+    pub(super) fn sidebar_tools(&mut self, ui: &mut Ui) {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 3.;
+            if Icon::Minus.button(ui, "Zoom out", false).clicked() {
+                self.camera.zoom_by(0.8, Vec2::ZERO);
+            }
+            if Icon::Plus.button(ui, "Zoom in", false).clicked() {
+                self.camera.zoom_by(1.25, Vec2::ZERO);
+            }
+            if ui
+                .add(Button::new("Fit").min_size(vec2(42., 34.)))
+                .on_hover_text(format!(
+                    "Frame all displays and the wallpaper · {:.0}%",
+                    self.camera.zoom * 100.
+                ))
+                .clicked()
+            {
+                self.reframe();
+            }
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if Icon::Monitor
+                    .button(ui, "Displays", self.tool == Tool::Displays)
+                    .clicked()
+                {
+                    self.tool = Tool::Displays;
+                }
+                if Icon::Image
+                    .button(ui, "Wallpaper", self.tool == Tool::Wallpaper)
+                    .clicked()
+                {
+                    self.tool = Tool::Wallpaper;
+                }
             });
+        });
     }
     pub(super) fn canvas(&mut self, ui: &mut Ui) {
         let (area, response) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
@@ -197,7 +172,6 @@ impl Editor {
         let media = screen_rect(origin, scale, layout.media(&self.settings));
         let draw = ui.painter_at(area);
         draw.rect_filled(area, 0, INK);
-        draw.hline(area.x_range(), area.top(), Stroke::new(1.0_f32, LINE));
         // Keep the grid legible throughout the zoom range and proportional to distance.
         let mut step = 25. * scale;
         while step < 16. {
@@ -262,7 +236,7 @@ impl Editor {
                     label.center(),
                     Align2::CENTER_CENTER,
                     (i + 1).to_string(),
-                    FontId::monospace(11.),
+                    FontId::proportional(12.),
                     if selected { INK } else { Color32::WHITE },
                 );
             }
@@ -375,13 +349,18 @@ mod tests {
         assert_eq!([panel.x, panel.y], [35., -13.]);
         frame(&mut editor, vec![button(end, false)]);
         let saved = editor.settings.clone();
-        editor.tool = Tool::Pan;
+        let middle = |pos, pressed| Event::PointerButton {
+            pos,
+            button: PointerButton::Middle,
+            pressed,
+            modifiers: Modifiers::NONE,
+        };
         frame(
             &mut editor,
-            vec![Event::PointerMoved(start), button(start, true)],
+            vec![Event::PointerMoved(start), middle(start, true)],
         );
         frame(&mut editor, vec![Event::PointerMoved(end)]);
-        frame(&mut editor, vec![button(end, false)]);
+        frame(&mut editor, vec![middle(end, false)]);
         assert!(saved == editor.settings);
         assert_eq!(editor.camera.offset, end - start);
     }

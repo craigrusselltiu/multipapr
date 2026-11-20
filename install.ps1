@@ -41,6 +41,7 @@ try {
         }
     }
     Copy-Item -LiteralPath $binary -Destination $installed -Force
+    Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'assets/fonts/LICENSE.txt') -Destination (Join-Path $installDir 'Inter-LICENSE.txt') -Force
     $programs = [Environment]::GetFolderPath('Programs')
     $shortcut = (New-Object -ComObject WScript.Shell).CreateShortcut((Join-Path $programs 'Multipapr.lnk'))
     $shortcut.TargetPath = $installed

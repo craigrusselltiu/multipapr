@@ -11,4 +11,4 @@ Build a Windows wallpaper editor and a quiet, per-user wallpaper host in Rust.
 
 ## Editor refinement
 
-Use one draggable app bar with native window actions and rounded desktop-window corners. Keep the wallpaper visible in a large canvas. A compact toolbar selects Wallpaper, Displays or Pan. Keep image placement, physical display calibration and the temporary camera transform independent. Wheel zoom stays anchored to the pointer and Fit view restores the composition. Publish the logo candidates for selection before changing the app icon.
+Use one draggable app bar with native window actions and rounded desktop-window corners. Keep the wallpaper visible in a large canvas. The sidebar holds zoom, canvas fit and the wallpaper and display tools. Middle-drag or drag empty space to pan. Window actions and the settings cog share a single title bar. Keep image placement, physical display calibration and the temporary camera transform independent.

@@ -1,5 +1,7 @@
 mod canvas;
 mod chrome;
+mod icons;
+mod preferences;
 use crate::{
     displays, host,
     layout::{Display, Layout, Media, Rect as World, Settings},
@@ -20,6 +22,41 @@ const FIELD: Color32 = Color32::from_rgb(44, 44, 50);
 const LINE: Color32 = Color32::from_rgb(57, 57, 64);
 const ACCENT: Color32 = Color32::from_rgb(193, 187, 252);
 const MUTED: Color32 = Color32::from_rgb(173, 172, 183);
+
+fn heading_font(size: f32) -> FontId {
+    FontId::new(size, FontFamily::Name("Inter Semibold".into()))
+}
+fn set_fonts(ctx: &Context) {
+    let mut fonts = FontDefinitions::default();
+    for (name, bytes, family) in [
+        (
+            "Inter",
+            include_bytes!("../assets/fonts/Inter-Regular.ttf").as_slice(),
+            FontFamily::Proportional,
+        ),
+        (
+            "Inter Semibold",
+            include_bytes!("../assets/fonts/Inter-SemiBold.ttf").as_slice(),
+            heading_font(16.).family,
+        ),
+    ] {
+        fonts
+            .font_data
+            .insert(name.into(), FontData::from_static(bytes).into());
+        let mut fallback = fonts.families[&FontFamily::Proportional].clone();
+        fallback.insert(0, name.into());
+        fonts.families.insert(family, fallback);
+    }
+    ctx.set_fonts(fonts);
+}
+fn resolution(ui: &mut Ui, w: u32, h: u32) {
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("Resolution").color(MUTED));
+        ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+            ui.label(format!("{w} × {h} px"));
+        });
+    });
+}
 
 struct Imported {
     media: Media,
@@ -42,6 +79,7 @@ struct Editor {
     new_source: bool,
     frame: World,
     login: bool,
+    popup: Option<preferences::SettingsPopup>,
     message: String,
     last_check: Instant,
     playback_error: Option<String>,
@@ -54,21 +92,7 @@ impl Editor {
         icon: &IconData,
     ) -> Self {
         chrome::install(cc);
-        if let Some(dir) = std::env::var_os("WINDIR") {
-            let path = PathBuf::from(dir).join("Fonts/segoeui.ttf");
-            if let Ok(bytes) = std::fs::read(path) {
-                let mut fonts = FontDefinitions::default();
-                fonts
-                    .font_data
-                    .insert("Segoe UI".into(), FontData::from_owned(bytes).into());
-                fonts
-                    .families
-                    .entry(FontFamily::Proportional)
-                    .or_default()
-                    .insert(0, "Segoe UI".into());
-                cc.egui_ctx.set_fonts(fonts);
-            }
-        }
+        set_fonts(&cc.egui_ctx);
         let mut visuals = Visuals::dark();
         visuals.panel_fill = PANEL;
         visuals.window_fill = PANEL;
@@ -91,9 +115,9 @@ impl Editor {
         cc.egui_ctx.set_visuals(visuals);
         cc.egui_ctx.options_mut(|o| o.zoom_with_keyboard = false);
         cc.egui_ctx.style_mut(|s| {
-            s.spacing.item_spacing = vec2(8., 8.);
-            s.spacing.interact_size.y = 28.;
-            s.spacing.button_padding = vec2(10., 5.);
+            s.spacing.item_spacing = vec2(8., 10.);
+            s.spacing.interact_size.y = 36.;
+            s.spacing.button_padding = vec2(14., 8.);
             s.text_styles
                 .insert(TextStyle::Small, FontId::proportional(12.));
             s.text_styles
@@ -103,12 +127,12 @@ impl Editor {
         });
         let login = storage::startup_enabled() || settings.media.path.as_os_str().is_empty();
         let brand = cc.egui_ctx.load_texture(
-            "Seam",
+            "Fold",
             ColorImage::from_rgba_unmultiplied(
                 [icon.width as usize, icon.height as usize],
                 &icon.rgba,
             ),
-            TextureOptions::LINEAR,
+            TextureOptions::LINEAR.with_mipmap_mode(Some(TextureFilter::Linear)),
         );
         let mut app = Self {
             brand,
@@ -130,6 +154,7 @@ impl Editor {
             new_source: false,
             frame: World::default(),
             login,
+            popup: None,
             message: String::new(),
             last_check: Instant::now(),
             playback_error: None,
@@ -215,7 +240,7 @@ impl Editor {
             ui.label(RichText::new(label).color(MUTED));
             ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
                 ui.add_sized(
-                    [88., 28.],
+                    [102., 34.],
                     DragValue::new(value)
                         .speed(0.5)
                         .range(range)
@@ -229,14 +254,17 @@ impl Editor {
         .inner
     }
     fn calibration(&mut self, ui: &mut Ui) {
-        ui.label(RichText::new("Displays").size(19.).strong());
+        ui.label(RichText::new("Displays").font(heading_font(19.)));
         ui.add_space(3.);
         for (i, d) in self.displays.iter().enumerate() {
             let label = format!("{}    {}", i + 1, d.name);
             if ui
                 .add_sized(
-                    [ui.available_width(), 31.],
-                    Button::new(label).selected(self.selected == i),
+                    [ui.available_width(), 36.],
+                    Button::new(label)
+                        .selected(self.selected == i)
+                        .corner_radius(7)
+                        .stroke(Stroke::NONE),
                 )
                 .clicked()
             {
@@ -247,33 +275,19 @@ impl Editor {
         ui.add_space(8.);
         let i = self.selected;
         let d = &self.displays[i];
-        ui.label(
-            RichText::new(format!(
-                "{:.0} × {:.0} px{}",
-                d.px.w,
-                d.px.h,
-                if d.primary { "  ·  Primary" } else { "" }
-            ))
-            .small()
-            .color(MUTED),
-        );
+        resolution(ui, d.px.w as u32, d.px.h as u32);
+        ui.add_space(4.);
+        ui.separator();
+        CollapsingHeader::new(RichText::new("Advanced").font(heading_font(14.)))
+            .id_salt(("advanced", &d.id))
+            .default_open(false)
+            .show_unindented(ui, |ui| self.advanced(ui));
+    }
+    fn advanced(&mut self, ui: &mut Ui) {
+        let i = self.selected;
+        let d = &self.displays[i];
         let l = self.layout();
         let mut size = [l.panels[i].w, l.panels[i].h];
-        ui.add_space(4.);
-        if d.estimated
-            && self
-                .settings
-                .calibration
-                .get(&d.id)
-                .and_then(|c| c.size)
-                .is_none()
-        {
-            ui.label(
-                RichText::new("Estimated size · measure lit area")
-                    .small()
-                    .color(ACCENT),
-            );
-        }
         let width = Self::field(ui, "Panel width", &mut size[0], 10.0..=10000.0, " mm");
         let height = Self::field(ui, "Panel height", &mut size[1], 10.0..=10000.0, " mm");
         if width || height {
@@ -283,60 +297,39 @@ impl Editor {
                 .or_default()
                 .size = Some(size);
         }
+        let p = l.panels[i];
+        let (mut x, mut y) = (p.x, p.y);
         if i > 0 {
-            let p = l.panels[i];
             let j = l.parents[i];
             let reference = l.panels[j];
-            let a = reference;
-            let b = p;
+            let a = self.displays[j].px;
+            let b = d.px;
             let horizontal =
                 (b.x - a.right()).max(a.x - b.right()) >= (b.y - a.bottom()).max(a.y - b.bottom());
+            x -= reference.x;
+            y -= reference.y;
+            if horizontal {
+                x -= if b.x >= a.x { reference.w } else { -p.w };
+            } else {
+                y -= if b.y >= a.y { reference.h } else { -p.h };
+            }
             ui.add_space(4.);
             ui.label(
                 RichText::new(format!("Relative to display {}", j + 1))
                     .small()
                     .color(MUTED),
             );
-            let (label_x, label_y, x, y, sx, sy) = if horizontal {
-                let right = b.x >= a.x;
-                (
-                    "Horizontal gap",
-                    "Top offset",
-                    if right {
-                        p.x - reference.right()
-                    } else {
-                        reference.x - p.right()
-                    },
-                    p.y - reference.y,
-                    if right { 1. } else { -1. },
-                    1.,
-                )
-            } else {
-                let below = b.y >= a.y;
-                (
-                    "Left offset",
-                    "Vertical gap",
-                    p.x - reference.x,
-                    if below {
-                        p.y - reference.bottom()
-                    } else {
-                        reference.y - p.bottom()
-                    },
-                    1.,
-                    if below { 1. } else { -1. },
-                )
-            };
-            let (mut nx, mut ny) = (x, y);
-            let changed_x = Self::field(ui, label_x, &mut nx, -10000.0..=10000.0, " mm");
-            let changed_y = Self::field(ui, label_y, &mut ny, -10000.0..=10000.0, " mm");
-            if changed_x || changed_y {
-                l.move_panel(
-                    &self.displays,
-                    &mut self.settings,
-                    i,
-                    [(nx - x) * sx, (ny - y) * sy],
-                );
-            }
+        }
+        let previous = [x, y];
+        let move_x = Self::field(ui, "Horizontal offset", &mut x, -10000.0..=10000.0, " mm");
+        let move_y = Self::field(ui, "Vertical offset", &mut y, -10000.0..=10000.0, " mm");
+        if move_x || move_y {
+            l.move_panel(
+                &self.displays,
+                &mut self.settings,
+                i,
+                [x - previous[0], y - previous[1]],
+            );
         }
         ui.add_space(5.);
         if ui
@@ -353,24 +346,8 @@ impl Editor {
             self.calibration(ui);
             return;
         }
-        ui.label(RichText::new("Wallpaper").size(19.).strong());
+        ui.label(RichText::new("Wallpaper").font(heading_font(19.)));
         ui.add_space(4.);
-        let media = &self.settings.media;
-        if let Some(name) = media.path.file_name() {
-            ui.add(Label::new(RichText::new(name.to_string_lossy()).size(14.)).wrap())
-                .on_hover_text(media.path.display().to_string());
-            let ext = media
-                .path
-                .extension()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .to_uppercase();
-            ui.label(
-                RichText::new(format!("{ext}   ·   {} × {}", media.width, media.height))
-                    .small()
-                    .color(MUTED),
-            );
-        }
         let label = if self.pending.is_some() {
             "Loading…"
         } else if self.texture.is_some() {
@@ -378,43 +355,41 @@ impl Editor {
         } else {
             "Choose file…"
         };
-        if ui.button(label).clicked() {
-            self.pick(ui.ctx());
-        }
-        if self.texture.is_some() {
-            ui.add_space(12.);
-            ui.separator();
-            ui.add_space(10.);
-            ui.label(RichText::new("Placement").strong().size(15.));
-            let mut percent = self.settings.scale * 100.;
-            if Self::field(ui, "Scale", &mut percent, 1.0..=10000.0, " %") {
-                self.settings.scale = percent / 100.;
+        ui.horizontal(|ui| {
+            if ui.button(label).clicked() {
+                self.pick(ui.ctx());
             }
-            ui.horizontal(|ui| {
-                if ui.button("Native size").clicked() {
+            ui.add_enabled_ui(self.texture.is_some(), |ui| {
+                if ui
+                    .button("Fill")
+                    .on_hover_text("Use the wallpaper’s native size")
+                    .clicked()
+                {
                     self.settings.scale = 1.;
                     self.settings.pan = [0.; 2];
                     self.reframe();
                 }
-                if ui.button("Cover").clicked() {
+                if ui
+                    .button("Fit")
+                    .on_hover_text("Cover all displays")
+                    .clicked()
+                {
                     self.layout().cover(&mut self.settings);
                     self.reframe();
                 }
             });
-            ui.add_space(15.);
-            ui.separator();
-            ui.add_space(10.);
-            ui.label(RichText::new("Displays").strong().size(15.));
-            for (i, d) in self.displays.iter().enumerate() {
-                let label = format!("{}    {}  ×  {}", i + 1, d.px.w as u32, d.px.h as u32);
-                if ui
-                    .add(Button::new(RichText::new(label).color(MUTED)).frame(false))
-                    .on_hover_text(&d.name)
-                    .clicked()
-                {
-                    self.selected = i;
-                    self.tool = Tool::Displays;
-                }
+        });
+        ui.add_space(4.);
+        let media = &self.settings.media;
+        if let Some(name) = media.path.file_name() {
+            ui.add(Label::new(RichText::new(name.to_string_lossy()).color(MUTED)).wrap())
+                .on_hover_text(media.path.display().to_string());
+            resolution(ui, media.width, media.height);
+        }
+        if self.texture.is_some() {
+            let mut percent = self.settings.scale * 100.;
+            if Self::field(ui, "Scale", &mut percent, 1.0..=10000.0, " %") {
+                self.settings.scale = percent / 100.;
             }
         }
     }
@@ -481,40 +456,45 @@ impl eframe::App for Editor {
             self.last_check = Instant::now();
         }
         ctx.request_repaint_after(Duration::from_secs(3));
-        if let Some(path) = ctx.input(|i| i.raw.dropped_files.first().and_then(|f| f.path.clone()))
+        if self.popup.as_mut().is_some_and(|popup| popup.ready(ctx)) {
+            self.show_preferences(ctx);
+            return;
+        }
+        if self.popup.is_none()
+            && let Some(path) =
+                ctx.input(|i| i.raw.dropped_files.first().and_then(|f| f.path.clone()))
         {
             self.import(path, true, ctx);
         }
-        chrome::show(ctx, self.brand.id());
+        let open_settings = chrome::show(ctx, self.brand.id());
         SidePanel::right("inspector")
             .resizable(false)
-            .exact_width(250.)
-            .frame(Frame::new().fill(PANEL).inner_margin(18))
+            .exact_width(286.)
+            .frame(
+                Frame::new()
+                    .fill(PANEL)
+                    .inner_margin(Margin::symmetric(18, 14)),
+            )
             .show(ctx, |ui| {
-                ui.with_layout(egui::Layout::bottom_up(Align::Min), |ui| {
-                    if ui.checkbox(&mut self.login, "Start at sign-in").changed() {
-                        if let Err(e) = storage::startup(self.login) {
-                            self.login = !self.login;
-                            self.message = e.to_string();
-                        }
-                    }
+                self.sidebar_tools(ui);
+                ui.add_space(2.);
+                ui.separator();
+                ui.add_space(5.);
+                ScrollArea::vertical().show(ui, |ui| {
+                    self.inspector(ui);
                     let status = self.playback_error.as_deref().unwrap_or(&self.message);
                     if !status.is_empty() {
                         ui.colored_label(ACCENT, status);
                     }
-                    ui.separator();
-                    ui.with_layout(egui::Layout::top_down(Align::Min), |ui| {
-                        ScrollArea::vertical().show(ui, |ui| self.inspector(ui));
-                    });
                 });
             });
         CentralPanel::default()
             .frame(Frame::new().fill(INK))
-            .show(ctx, |ui| {
-                self.toolbar(ui);
-                self.canvas(ui);
-            });
+            .show(ctx, |ui| self.canvas(ui));
         self.sync(ctx);
+        if open_settings && self.popup.is_none() {
+            self.popup = Some(preferences::SettingsPopup::capture(ctx));
+        }
     }
     fn on_exit(&mut self, _: Option<&eframe::glow::Context>) {
         if self.saved != self.settings {
