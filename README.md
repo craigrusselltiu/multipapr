@@ -48,19 +48,16 @@ irm https://raw.githubusercontent.com/craigrusselltiu/multipapr/main/install.ps1
   </picture>
 </p>
 
-> [!TIP]
-> **Measure once.** Multipapr reads each panel's size from the monitor. Drag a display to where it actually sits, or type the gap in millimetres under **Advanced**. Include both bezels and any air gap.
-
-1. **Choose a file:** an MP4, MOV, MKV or WebM video, or a PNG, JPEG, WebP or BMP image. You can also drop it onto the canvas.
-2. **Frame it.** Drag the wallpaper to move it and drag its corner to resize it. **Fill** shows it at native size, so a 4K image appears twice the size of a 1080p panel. **Fit** covers every display. **Upscaling** picks the resampling filter: Catmull-Rom by default, or None, Spline36, Lanczos or EWA Lanczos Sharp. Sharper filters cost more GPU time.
-3. **Line up the displays.** Use the monitor tool to drag each display into place. The wallpaper on your desktop updates as you drag.
-4. **Close the window.** The wallpaper keeps playing from the tray and starts again when you sign in.
+1. **Pick a wallpaper.** Drop or browse for a video (MP4, MOV, MKV, WebM) or image (PNG, JPEG, WebP, BMP).
+2. **Frame it.** Drag to move, pull a corner to resize, or use **Fill**, **Fit** and **Upscaling** in the sidebar.
+3. **Align your displays.** Switch to the monitor tool and drag each screen to match your desk, or enter exact millimetre gaps (including bezels) under **Advanced**. Changes apply live.
+4. **Close the window.** Multipapr keeps playing from the tray by default and starts at sign-in.
 
 <table>
-  <tr><td><b>Pan / zoom</b></td><td>Drag empty canvas or middle-drag. Scroll to zoom. <b>Reset scale</b> reframes.</td></tr>
-  <tr><td><b>Lock an axis</b></td><td>Hold <kbd>Ctrl</kbd> to drag horizontally, <kbd>Ctrl</kbd>+<kbd>Shift</kbd> for vertically.</td></tr>
-  <tr><td><b>Tray</b></td><td>Click to reopen the editor. Right-click → <b>Close</b> to stop the wallpaper.</td></tr>
-  <tr><td><b>Startup</b></td><td>Toggle <b>Start at sign-in</b> from the settings cog.</td></tr>
+  <tr><td><b>Canvas</b></td><td>Drag empty space or middle-drag to pan. Scroll to zoom. <b>Reset scale</b> reframes.</td></tr>
+  <tr><td><b>Lock axis</b></td><td>Hold <kbd>Ctrl</kbd> for horizontal, <kbd>Ctrl</kbd>+<kbd>Shift</kbd> for vertical.</td></tr>
+  <tr><td><b>Tray</b></td><td>Click to reopen. Right-click → <b>Close</b> to stop the wallpaper.</td></tr>
+  <tr><td><b>Settings</b></td><td>Toggle <b>Start at sign-in</b>, <b>Close to system tray</b> or update Multipapr from the cog icon.</td></tr>
 </table>
 
 ## Lightweight
