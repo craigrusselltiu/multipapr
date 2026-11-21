@@ -3,12 +3,14 @@ use eframe::egui::*;
 
 #[derive(Clone, Copy)]
 pub(super) enum Icon {
-    Image,
-    Monitor,
     Minus,
     Plus,
     Cog,
     Close,
+    Undo,
+    Redo,
+    Profiles,
+    Folder,
 }
 
 impl Icon {
@@ -17,35 +19,6 @@ impl Icon {
         let point = |x, y| center + vec2(x, y);
         let line = |a, b| draw.line_segment([a, b], pen);
         match self {
-            Self::Image => {
-                draw.rect_stroke(
-                    Rect::from_center_size(center, vec2(16., 14.)),
-                    3,
-                    pen,
-                    StrokeKind::Middle,
-                );
-                draw.circle_filled(point(-3., -2.5), 1.35, tint);
-                draw.add(Shape::line(
-                    vec![
-                        point(-7., 4.),
-                        point(-2., 0.),
-                        point(1., 2.),
-                        point(4., -1.),
-                        point(7., 2.),
-                    ],
-                    pen,
-                ));
-            }
-            Self::Monitor => {
-                draw.rect_stroke(
-                    Rect::from_center_size(point(0., -1.5), vec2(17., 12.)),
-                    2,
-                    pen,
-                    StrokeKind::Middle,
-                );
-                line(point(0., 5.), point(0., 8.));
-                line(point(-4., 8.), point(4., 8.));
-            }
             Self::Minus | Self::Plus => {
                 line(point(-5., 0.), point(5., 0.));
                 if matches!(self, Self::Plus) {
@@ -55,6 +28,46 @@ impl Icon {
             Self::Close => {
                 line(point(-4.5, -4.5), point(4.5, 4.5));
                 line(point(-4.5, 4.5), point(4.5, -4.5));
+            }
+            Self::Undo | Self::Redo => {
+                let flip = if matches!(self, Self::Redo) { -1. } else { 1. };
+                let at = |x: f32, y: f32| point(x * flip, y);
+                let mut hook = vec![at(-6., -3.)];
+                for step in 0..=10 {
+                    let a = (step as f32 / 10. - 0.5) * std::f32::consts::PI;
+                    hook.push(at(2. + 4.5 * a.cos(), 1.5 + 4.5 * a.sin()));
+                }
+                hook.push(at(-1., 6.));
+                draw.add(Shape::line(hook, pen));
+                draw.add(Shape::line(
+                    vec![at(-2.5, -6.5), at(-6., -3.), at(-2.5, 0.5)],
+                    pen,
+                ));
+            }
+            Self::Folder => {
+                draw.add(Shape::closed_line(
+                    vec![
+                        point(-8., -6.),
+                        point(-3., -6.),
+                        point(-1., -4.),
+                        point(8., -4.),
+                        point(8., 6.),
+                        point(-8., 6.),
+                    ],
+                    pen,
+                ));
+            }
+            Self::Profiles => {
+                draw.add(Shape::closed_line(
+                    vec![
+                        point(-5., -7.),
+                        point(5., -7.),
+                        point(5., 7.),
+                        point(0., 3.),
+                        point(-5., 7.),
+                    ],
+                    pen,
+                ));
             }
             Self::Cog => {
                 let mut outline = Vec::with_capacity(32);

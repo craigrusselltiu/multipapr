@@ -33,15 +33,35 @@ fn run() -> Result<()> {
                 .next()
                 .context("Usage: multipapr --apply <media path>")?;
             let media = storage::probe(Path::new(&file))?;
-            let previous = storage::load().ok();
-            let first = previous.is_none();
+            let previous = storage::load_optional()?;
+            let mut profiles = storage::load_profiles().ok();
+            let first = previous.as_ref().is_none_or(layout::Settings::is_empty)
+                && profiles
+                    .as_ref()
+                    .is_some_and(|p| p.iter().all(layout::Profile::is_empty));
             let mut s = layout::Settings::new(media);
             if let Some(previous) = previous {
                 s.calibration = previous.calibration;
                 s.upscaling = previous.upscaling;
+                s.pitch = previous.pitch;
+                s.profile = previous.profile;
+                s.screens = previous.screens;
             }
-            layout::Layout::new(&displays::detect()?, &s.calibration).cover(&mut s);
+            let displays = displays::detect()?;
+            let layout = layout::Layout::new(&displays, &s.calibration);
+            let pitch = layout.pitch(&s);
+            s.wallpaper.cover(pitch, layout.bounds);
+            layout.freeze(&displays, &mut s);
+            let set = layout::display_set(&displays);
+            if let Some(profiles) = &mut profiles {
+                layout::remember(profiles, &mut s, &set);
+            } else {
+                s.display_set = set;
+            }
             storage::apply(&s)?;
+            if let Some(profiles) = profiles {
+                storage::save_profiles(&profiles)?;
+            }
             if first {
                 storage::startup(true)?;
             }

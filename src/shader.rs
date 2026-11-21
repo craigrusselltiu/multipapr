@@ -1,8 +1,7 @@
-use crate::layout::{Display, Layout, Settings};
+use crate::layout::{Display, Layout, Rect, Settings};
 use std::fmt::Write;
+use std::path::PathBuf;
 
-// Resampling kernels, selected at runtime by the `upscaler` parameter
-// (0 none, 1 Catmull-Rom, 2 Spline36, 3 Lanczos, 4 EWA Lanczos Sharp).
 // Definitions follow mpv's filter_kernels.c.
 const SAMPLING: &str = r#"
 float bessel_j1(float x) {
@@ -72,22 +71,53 @@ vec4 source(vec2 uv) {
 }
 "#;
 
-// Only the destination pixel rectangles are baked into the shader. The four
-// source coordinates per display and the upscaler are parameters, updated
-// while the decoder runs.
-pub fn generate(displays: &[Display], layout: &Layout) -> String {
-    let desktop = layout.desktop;
+#[derive(Clone, PartialEq)]
+pub struct Part {
+    pub media: PathBuf,
+    pub displays: Vec<usize>,
+}
+impl Part {
+    pub fn desktop(&self, displays: &[Display]) -> Rect {
+        self.displays
+            .iter()
+            .map(|&i| displays[i].px)
+            .reduce(Rect::union)
+            .unwrap()
+    }
+}
+pub fn plan(settings: &Settings, displays: &[Display]) -> Vec<Part> {
+    let parts = if settings.multi {
+        (0..displays.len())
+            .map(|i| Part {
+                media: settings.shown(&displays[i].id).media.path.clone(),
+                displays: vec![i],
+            })
+            .collect()
+    } else {
+        vec![Part {
+            media: settings.wallpaper.media.path.clone(),
+            displays: (0..displays.len()).collect(),
+        }]
+    };
+    parts
+        .into_iter()
+        .filter(|p| !p.media.as_os_str().is_empty())
+        .collect()
+}
+
+pub fn generate(displays: &[Display], part: &Part) -> String {
+    let desktop = part.desktop(displays);
     let mut code = String::new();
-    for i in 0..displays.len() {
+    for k in 0..part.displays.len() {
         for name in ["u", "v", "w", "h"] {
-            writeln!(code, "//!PARAM {name}{i}\n//!TYPE DYNAMIC float\n0.0\n").unwrap();
+            writeln!(code, "//!PARAM {name}{k}\n//!TYPE DYNAMIC float\n0.0\n").unwrap();
         }
     }
     code.push_str("//!PARAM upscaler\n//!TYPE DYNAMIC int\n1\n\n");
     writeln!(code, "//!HOOK MAIN\n//!BIND HOOKED\n//!WIDTH {:.0}\n//!HEIGHT {:.0}\n//!DESC Multipapr display mapping\n{SAMPLING}\nvec4 hook() {{\n vec2 p = HOOKED_pos * vec2({:.1}, {:.1});",
         desktop.w, desktop.h, desktop.w, desktop.h).unwrap();
-    for (i, display) in displays.iter().enumerate() {
-        let r = display.px;
+    for (k, &i) in part.displays.iter().enumerate() {
+        let r = displays[i].px;
         let x = r.x - desktop.x;
         let y = r.y - desktop.y;
         writeln!(
@@ -97,19 +127,25 @@ pub fn generate(displays: &[Display], layout: &Layout) -> String {
             y + r.h
         )
         .unwrap();
-        writeln!(code, "  vec2 uv = (p - vec2({x:.1}, {y:.1})) / vec2({:.1}, {:.1}) * vec2(w{i}, h{i}) + vec2(u{i}, v{i});", r.w, r.h).unwrap();
+        writeln!(code, "  vec2 uv = (p - vec2({x:.1}, {y:.1})) / vec2({:.1}, {:.1}) * vec2(w{k}, h{k}) + vec2(u{k}, v{k});", r.w, r.h).unwrap();
         code.push_str("  if (all(greaterThanEqual(uv, vec2(0.0))) && all(lessThan(uv, vec2(1.0)))) return source(uv);\n }\n");
     }
     code.push_str(" return vec4(0.0, 0.0, 0.0, 1.0);\n}\n");
     code
 }
 
-pub fn parameters(layout: &Layout, settings: &Settings) -> String {
-    let source = layout.media(settings);
-    let mut values = Vec::with_capacity(layout.panels.len() + 1);
-    for (i, panel) in layout.panels.iter().enumerate() {
+pub fn parameters(
+    layout: &Layout,
+    settings: &Settings,
+    displays: &[Display],
+    part: &Part,
+) -> String {
+    let mut values = Vec::with_capacity(part.displays.len() + 1);
+    for (k, &i) in part.displays.iter().enumerate() {
+        let panel = layout.panels[i];
+        let source = layout.media(settings, settings.shown(&displays[i].id));
         values.push(format!(
-            "u{i}={:.9},v{i}={:.9},w{i}={:.9},h{i}={:.9}",
+            "u{k}={:.9},v{k}={:.9},w{k}={:.9},h{k}={:.9}",
             (panel.x - source.x) / source.w,
             (panel.y - source.y) / source.h,
             panel.w / source.w,
@@ -118,4 +154,75 @@ pub fn parameters(layout: &Layout, settings: &Settings) -> String {
     }
     values.push(format!("upscaler={}", settings.upscaling as u8));
     values.join(",")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::layout::{Media, Wallpaper};
+
+    fn display(id: &str, x: f32) -> Display {
+        Display {
+            id: id.into(),
+            name: id.into(),
+            primary: id == "a",
+            px: Rect::new(x, 0., 1920., 1080.),
+            mm: [480., 270.],
+            estimated: false,
+            mirrors: Vec::new(),
+            mirror_ids: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn multi_mode_plays_each_display_on_its_own_and_skips_empty_ones() {
+        let displays = [display("a", 0.), display("b", 1920.), display("c", 3840.)];
+        let media = |path: &str| Media {
+            path: path.into(),
+            width: 1920,
+            height: 1080,
+        };
+        let mut settings = Settings::new(media("span.mp4"));
+        assert!(
+            plan(&settings, &displays)
+                == [Part {
+                    media: "span.mp4".into(),
+                    displays: vec![0, 1, 2],
+                }]
+        );
+        settings.multi = true;
+        settings
+            .screens
+            .insert("b".into(), Wallpaper::new(media("b.png")));
+        settings
+            .screens
+            .insert("c".into(), Wallpaper::new(media("")));
+        let parts = plan(&settings, &displays);
+        let files: Vec<_> = parts.iter().map(|p| p.media.to_str().unwrap()).collect();
+        assert_eq!(files, ["span.mp4", "b.png"]);
+        assert_eq!(parts[1].displays, [1]);
+        assert_eq!(parts[1].desktop(&displays), displays[1].px);
+        let code = generate(&displays, &parts[1]);
+        assert!(code.contains("//!PARAM u0") && !code.contains("//!PARAM u1"));
+        let pipe = crate::host::player_pipe(42, &parts[1], &displays);
+        let layout = Layout::new(&displays, &settings.calibration);
+        let pitch = layout.pitch(&settings);
+        settings
+            .screens
+            .get_mut("b")
+            .unwrap()
+            .cover(pitch, layout.panels[1]);
+        assert!(
+            parameters(&layout, &settings, &displays, &parts[1])
+                .starts_with("u0=0.000000000,v0=0.000000000,w0=1.000000000,h0=1.000000000")
+        );
+        settings.screens.get_mut("b").unwrap().media.path = "other.jpg".into();
+        assert_ne!(
+            crate::host::player_pipe(42, &plan(&settings, &displays)[1], &displays),
+            pipe
+        );
+        let mut moved = displays.clone();
+        moved[1].px.x = -1920.;
+        assert_ne!(crate::host::player_pipe(42, &parts[1], &moved), pipe);
+    }
 }

@@ -130,7 +130,7 @@ impl UpdateState {
     }
 
     fn error_message(&self) -> Option<&str> {
-        self.error.as_deref().or_else(|| match &self.phase {
+        self.error.as_deref().or(match &self.phase {
             UpdatePhase::CheckFailed(msg) => Some(msg.as_str()),
             _ => None,
         })
@@ -144,8 +144,6 @@ enum UpdateAction {
     Install(Release),
 }
 
-// Each linear reduction averages a 2×2 area. Expanding the same pyramid
-// softens the result while keeping the dialog itself at native resolution.
 fn blur_editor(info: PaintCallbackInfo, painter: &eframe::egui_glow::Painter) {
     let gl = painter.gl();
     let [width, height] = info.screen_size_px.map(|n| n as i32);
@@ -224,7 +222,7 @@ fn lerp_color(a: Color32, b: Color32, t: f32) -> Color32 {
     )
 }
 
-fn toggle_switch(ui: &mut Ui, on: &mut bool, label: &str) -> Response {
+pub(super) fn toggle_switch(ui: &mut Ui, on: &mut bool, label: &str) -> Response {
     let (rect, mut response) = ui.allocate_exact_size(vec2(38., 22.), Sense::click());
     if response.clicked() {
         *on = !*on;
@@ -474,7 +472,6 @@ fn render_update_card(ui: &mut Ui, update: &UpdateState) -> UpdateAction {
 fn apply_update_and_relaunch(exe: &Path, staged: NamedTempFile) -> Result<()> {
     update::replace_executable(exe, staged)?;
     if !host::relaunch()? {
-        // Standalone `--editor` run with no host process: relaunch the updated editor directly.
         let child = storage::command(exe)
             .arg("--editor")
             .spawn()
@@ -864,7 +861,6 @@ mod tests {
     fn cards_span_full_width_and_rows_have_even_vertical_padding() {
         let ctx = Context::default();
         super::super::set_fonts(&ctx);
-        // Mirror Editor::new's interact_size.y = 36., which previously shifted centered rows down.
         ctx.style_mut(|s| s.spacing.interact_size.y = 36.);
         let mut general_card = Rect::NOTHING;
         let mut about_card = Rect::NOTHING;

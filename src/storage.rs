@@ -1,6 +1,7 @@
 use crate::{
-    desktop::{Handle, wide},
-    layout::{Media, Settings},
+    desktop::{Handle, make_int_resource, wide},
+    displays,
+    layout::{Display, Layout, Media, Profile, Settings},
 };
 use anyhow::{Context, Result, ensure};
 use image::{DynamicImage, ImageFormat, ImageReader, imageops::FilterType};
@@ -13,7 +14,7 @@ use std::{
     ptr::null,
 };
 use windows_sys::Win32::{
-    Foundation::{WAIT_ABANDONED, WAIT_OBJECT_0},
+    Foundation::{ERROR_LOCK_VIOLATION, ERROR_SHARING_VIOLATION, WAIT_ABANDONED, WAIT_OBJECT_0},
     System::{
         LibraryLoader::{
             FindResourceW, GetModuleHandleW, LoadResource, LockResource, SizeofResource,
@@ -24,6 +25,8 @@ use windows_sys::Win32::{
 use winreg::{RegKey, enums::HKEY_CURRENT_USER};
 
 const MPV_SETUP_MUTEX: &str = r"Local\Multipapr.MpvSetup.v1";
+const MPV_RESOURCE_ID: u16 = 101;
+const RT_RCDATA: u16 = 10;
 
 pub fn home() -> Result<PathBuf> {
     let path = PathBuf::from(env::var_os("LOCALAPPDATA").context("LOCALAPPDATA is unavailable")?)
@@ -54,11 +57,14 @@ pub fn mpv() -> Result<PathBuf> {
         .find(|p| p.is_file())
         .context("Install mpv or place mpv.exe beside multipapr.exe")
 }
-// build.rs downloads, verifies and embeds the pinned mpv build as resource 101.
 fn mpv_archive() -> Result<&'static [u8]> {
     unsafe {
         let module = GetModuleHandleW(null());
-        let res = FindResourceW(module, 101 as _, 10 as _); // 10 = RT_RCDATA
+        let res = FindResourceW(
+            module,
+            make_int_resource(MPV_RESOURCE_ID),
+            make_int_resource(RT_RCDATA),
+        );
         ensure!(!res.is_null(), "The bundled mpv is missing");
         let data = LockResource(LoadResource(module, res)) as *const u8;
         ensure!(!data.is_null(), "Cannot load the bundled mpv");
@@ -91,7 +97,6 @@ pub fn ensure_mpv() -> Result<PathBuf> {
     if let Ok(path) = mpv() {
         return Ok(path);
     }
-    // Windows cannot run an executable from memory, so unpack the bundled build once.
     let dir = mpv_dir()?;
     let staging = dir.with_extension("partial");
     let _ = fs::remove_dir_all(&staging);
@@ -100,14 +105,11 @@ pub fn ensure_mpv() -> Result<PathBuf> {
     fs::rename(&staging, &dir)?;
     mpv()
 }
-// Unpack mpv and run it once, so the antivirus scan of the new executable happens now
-// rather than when the first wallpaper loads.
 pub fn warm_up_mpv() {
     if let Ok(mpv) = ensure_mpv() {
         let _ = command(mpv).arg("--version").output();
     }
 }
-// The bundle is a zstd stream of: file count, then per file its name, size and bytes.
 fn unpack(bundle: &[u8], dest: &Path) -> Result<()> {
     fs::create_dir_all(dest)?;
     let mut z = zstd::Decoder::with_buffer(bundle)?;
@@ -126,22 +128,45 @@ fn unpack(bundle: &[u8], dest: &Path) -> Result<()> {
     Ok(())
 }
 pub fn save<T: serde::Serialize>(name: &str, value: &T) -> Result<()> {
-    let dir = home()?;
-    let mut tmp = tempfile::NamedTempFile::new_in(&dir)?;
+    save_in(&home()?, name, value)
+}
+fn save_in<T: serde::Serialize>(dir: &Path, name: &str, value: &T) -> Result<()> {
+    let destination = dir.join(name);
+    let mut tmp = tempfile::Builder::new().make_in(dir, |path| fs::File::create_new(path))?;
     serde_json::to_writer_pretty(&mut tmp, value)?;
     tmp.flush()?;
-    tmp.persist(dir.join(name))?;
+    let staged = tmp.into_temp_path();
+    for attempt in 1.. {
+        match fs::rename(&staged, &destination) {
+            Ok(()) => break,
+            Err(e)
+                if attempt < 10
+                    && (e.kind() == io::ErrorKind::PermissionDenied
+                        || matches!(
+                            e.raw_os_error().map(|code| code as u32),
+                            Some(ERROR_SHARING_VIOLATION | ERROR_LOCK_VIOLATION)
+                        )) =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(30));
+            }
+            Err(e) => {
+                return Err(e).with_context(|| format!("Cannot replace {}", destination.display()));
+            }
+        }
+    }
     Ok(())
 }
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct Preferences {
     pub close_to_tray: bool,
+    pub maintain_ratio: bool,
 }
 impl Default for Preferences {
     fn default() -> Self {
         Self {
             close_to_tray: true,
+            maintain_ratio: true,
         }
     }
 }
@@ -160,9 +185,46 @@ pub fn save_preferences(preferences: &Preferences) -> Result<()> {
     save("preferences.json", preferences)
 }
 pub fn load() -> Result<Settings> {
-    Ok(serde_json::from_slice(&fs::read(
-        home()?.join("layout.json"),
-    )?)?)
+    load_optional()?.context("Layout file is missing")
+}
+pub fn load_optional() -> Result<Option<Settings>> {
+    let path = home()?.join("layout.json");
+    let bytes = match fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e).context("Cannot read layout.json"),
+    };
+    Ok(Some(parse_settings(&bytes, displays::detect)?))
+}
+fn parse_settings(
+    bytes: &[u8],
+    displays: impl FnOnce() -> Result<Vec<Display>>,
+) -> Result<Settings> {
+    let mut value: serde_json::Value = serde_json::from_slice(bytes)?;
+    let legacy = value
+        .as_object_mut()
+        .filter(|o| !o.contains_key("center"))
+        .and_then(|o| o.remove("pan"));
+    let mut settings: Settings = serde_json::from_value(value)?;
+    if let Some(pan) = legacy {
+        let pan: [f32; 2] = serde_json::from_value(pan)?;
+        let displays = displays()?;
+        let layout = Layout::legacy(&displays, &settings.calibration);
+        let [x, y] = layout.bounds.center();
+        settings.wallpaper.center = [x + pan[0], y + pan[1]];
+        layout.freeze(&displays, &mut settings);
+    }
+    Ok(settings)
+}
+pub fn load_profiles() -> Result<Vec<Profile>> {
+    match fs::read(home()?.join("profiles.json")) {
+        Ok(bytes) => Ok(serde_json::from_slice(&bytes)?),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(e) => Err(e.into()),
+    }
+}
+pub fn save_profiles(profiles: &[Profile]) -> Result<()> {
+    save("profiles.json", &profiles)
 }
 fn parse_mpv_dimensions(stdout: &[u8]) -> Option<(u32, u32)> {
     let text = String::from_utf8_lossy(stdout);
@@ -173,12 +235,11 @@ fn parse_mpv_dimensions(stdout: &[u8]) -> Option<(u32, u32)> {
         (w > 0 && h > 0).then_some((w, h))
     })
 }
-// One mpv run reads the video size and saves the editor preview frame.
 fn probe_with_mpv(path: &Path) -> Result<(u32, u32)> {
     let dir = home()?;
-    let script = dir.join("probe.lua");
-    fs::write(&script, include_bytes!("../assets/probe.lua"))?;
     let temp = tempfile::tempdir_in(&dir)?;
+    let script = temp.path().join("probe.lua");
+    fs::write(&script, include_bytes!("../assets/probe.lua"))?;
     let out = command(ensure_mpv()?)
         .args([
             "--no-config",
@@ -205,31 +266,30 @@ fn probe_with_mpv(path: &Path) -> Result<(u32, u32)> {
         .filter_map(|e| e.ok().map(|e| e.path()))
         .find(|p| p.extension().and_then(|e| e.to_str()) == Some("jpg"))
     {
-        fs::rename(frame, preview_path(path)?)?;
+        fs::rename(frame, preview_path(path, &dir)?)?;
     }
     Ok(size)
 }
-fn preview_path(media: &Path) -> Result<PathBuf> {
+fn preview_path(media: &Path, dir: &Path) -> Result<PathBuf> {
     use std::hash::{DefaultHasher, Hash, Hasher};
     let mut hash = DefaultHasher::new();
     media.hash(&mut hash);
     fs::metadata(media)?.modified()?.hash(&mut hash);
-    Ok(home()?.join(format!("preview-{:016x}.jpg", hash.finish())))
+    Ok(dir.join(format!("preview-{:016x}.jpg", hash.finish())))
 }
 pub fn probe(path: &Path) -> Result<Media> {
     let path = fs::canonicalize(path).context("Cannot open the selected file")?;
-    // Avoid the extended path prefix with multimedia tools that parse paths as URLs.
     let path = std::path::absolute(dunce_path(&path))?;
-    if let Ok(reader) = ImageReader::open(&path).and_then(|r| r.with_guessed_format()) {
-        if let Ok((w, h)) = reader.into_dimensions() {
-            if w > 0 && h > 0 {
-                return Ok(Media {
-                    path,
-                    width: w,
-                    height: h,
-                });
-            }
-        }
+    if let Ok(reader) = ImageReader::open(&path).and_then(|r| r.with_guessed_format())
+        && let Ok((w, h)) = reader.into_dimensions()
+        && w > 0
+        && h > 0
+    {
+        return Ok(Media {
+            path,
+            width: w,
+            height: h,
+        });
     }
     let (w, h) = probe_with_mpv(&path)?;
     ensure!(w > 0 && h > 0, "Invalid source dimensions");
@@ -249,11 +309,13 @@ fn dunce_path(path: &Path) -> PathBuf {
         .unwrap_or_else(|| path.into())
 }
 pub fn preview(media: &Media) -> Result<image::RgbaImage> {
-    let path = preview_path(&media.path)?;
+    preview_in(media, &home()?)
+}
+fn preview_in(media: &Media, dir: &Path) -> Result<image::RgbaImage> {
+    let path = preview_path(&media.path, dir)?;
     if let Ok(image) = image::open(&path) {
         return Ok(image.into_rgba8());
     }
-    // Videos get their preview frame from probe(); only still images reach this point.
     let decoded = ImageReader::open(&media.path)?
         .with_guessed_format()?
         .decode()
@@ -280,22 +342,42 @@ pub fn startup(enabled: bool) -> Result<()> {
             "Multipapr",
             &format!("\"{}\" --background", env::current_exe()?.display()),
         )?;
-    } else if let Err(e) = key.delete_value("Multipapr") {
-        if e.kind() != std::io::ErrorKind::NotFound {
-            return Err(e.into());
-        }
+    } else if let Err(e) = key.delete_value("Multipapr")
+        && e.kind() != io::ErrorKind::NotFound
+    {
+        return Err(e.into());
     }
     Ok(())
 }
 pub fn apply(settings: &Settings) -> Result<()> {
     ensure_mpv()?;
-    ensure!(settings.media.path.is_file(), "Wallpaper file is missing");
+    ensure!(
+        settings.wallpaper.media.path.is_file(),
+        "Wallpaper file is missing"
+    );
     save("layout.json", settings)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rapid_saves_replace_json_while_the_host_reads_the_previous_version() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["layout.json", "profiles.json"] {
+            save_in(dir.path(), name, &0).unwrap();
+            let path = dir.path().join(name);
+            let mut reader = fs::File::open(&path).unwrap();
+            for value in 1..=12 {
+                save_in(dir.path(), name, &value).unwrap();
+                assert_eq!(fs::read_to_string(&path).unwrap(), value.to_string());
+            }
+            let mut previous = String::new();
+            reader.read_to_string(&mut previous).unwrap();
+            assert_eq!(previous, "0");
+        }
+    }
 
     #[test]
     fn parses_mpv_probe_output() {
@@ -312,8 +394,31 @@ mod tests {
         img.save(&file).unwrap();
         let media = probe(&file).unwrap();
         assert_eq!((media.width, media.height), (2000, 1000));
-        let thumb = preview(&media).unwrap();
+        let thumb = preview_in(&media, dir.path()).unwrap();
         assert_eq!((thumb.width(), thumb.height()), (1280, 640));
+    }
+
+    #[test]
+    fn migrates_the_wallpaper_offset_from_older_versions() {
+        let display = || {
+            Ok(vec![Display {
+                id: "a".into(),
+                name: "a".into(),
+                primary: true,
+                px: crate::layout::Rect::new(0., 0., 1920., 1080.),
+                mm: [480., 270.],
+                estimated: false,
+                mirrors: Vec::new(),
+                mirror_ids: Vec::new(),
+            }])
+        };
+        let old = br#"{"media":{"path":"a.mp4","width":1920,"height":1080},"scale":1.0,"pan":[10.0,-5.0],"calibration":{}}"#;
+        let settings = parse_settings(old, display).unwrap();
+        assert_eq!(settings.wallpaper.center, [250., 130.]);
+        assert_eq!(settings.pitch, Some(0.25));
+        assert_eq!(settings.calibration["a"].position, Some([0., 0.]));
+        let saved = serde_json::to_vec(&settings).unwrap();
+        assert!(parse_settings(&saved, || unreachable!()).unwrap() == settings);
     }
 
     #[test]
@@ -326,7 +431,6 @@ mod tests {
         fs::write(&path, r#"{"close_to_tray":false}"#).unwrap();
         assert!(!load_preferences_from(&path).close_to_tray);
 
-        // Unknown or missing fields still fall back to defaults.
         fs::write(&path, r#"{}"#).unwrap();
         assert!(load_preferences_from(&path).close_to_tray);
     }

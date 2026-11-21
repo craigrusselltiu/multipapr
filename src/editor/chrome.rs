@@ -1,4 +1,4 @@
-use super::{LINE, MUTED, PANEL, icons::Icon};
+use super::{ACCENT, LINE, MUTED, PANEL, icons::Icon};
 use eframe::egui::*;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use windows_sys::Win32::{
@@ -9,6 +9,15 @@ use windows_sys::Win32::{
 
 const HEIGHT: f32 = 50.;
 const CONTROL_WIDTH: f32 = 46.;
+const CONTROLS: f32 = 7.;
+
+pub struct Actions {
+    pub settings: bool,
+    pub undo: bool,
+    pub redo: bool,
+    pub profiles: bool,
+    pub profiles_anchor: Rect,
+}
 
 pub fn install(cc: &eframe::CreationContext<'_>) {
     let Ok(handle) = cc.window_handle() else {
@@ -70,7 +79,7 @@ unsafe extern "system" fn window_proc(
                 }
             }
             if pt.y < (HEIGHT * dpi) as i32
-                && pt.x < client.right - (4. * CONTROL_WIDTH * dpi) as i32
+                && pt.x < client.right - (CONTROLS * CONTROL_WIDTH * dpi) as i32
             {
                 return HTCAPTION as isize;
             }
@@ -101,7 +110,14 @@ unsafe extern "system" fn window_proc(
     }
 }
 
-pub fn show(ctx: &Context, brand: TextureId, close_to_tray: bool) -> bool {
+pub fn show(
+    ctx: &Context,
+    brand: TextureId,
+    close_to_tray: bool,
+    can_undo: bool,
+    can_redo: bool,
+    profiles_open: bool,
+) -> Actions {
     TopBottomPanel::top("app bar")
         .exact_height(HEIGHT)
         .frame(Frame::new().fill(PANEL))
@@ -127,16 +143,56 @@ pub fn show(ctx: &Context, brand: TextureId, close_to_tray: bool) -> bool {
                 area.bottom() - 0.5,
                 Stroke::new(1.0_f32, LINE),
             );
-            let settings_rect = Rect::from_min_size(
-                pos2(area.right() - 4. * CONTROL_WIDTH, area.top()),
-                vec2(CONTROL_WIDTH, HEIGHT),
-            );
-            let settings = ui.interact(settings_rect, ui.id().with("settings"), Sense::click());
-            settings.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, "Settings"));
-            if settings.hovered() || settings.has_focus() {
-                draw.rect_filled(settings_rect.shrink2(vec2(5., 7.)), 7, LINE);
+            let slot = |n: f32| {
+                Rect::from_min_size(
+                    pos2(area.right() - n * CONTROL_WIDTH, area.top()),
+                    vec2(CONTROL_WIDTH, HEIGHT),
+                )
+            };
+            let mut actions = Actions {
+                settings: false,
+                undo: false,
+                redo: false,
+                profiles: false,
+                profiles_anchor: slot(5.),
+            };
+            for (n, icon, label, enabled, action) in [
+                (7., Icon::Undo, "Undo", can_undo, &mut actions.undo),
+                (6., Icon::Redo, "Redo", can_redo, &mut actions.redo),
+                (5., Icon::Profiles, "Profiles", true, &mut actions.profiles),
+                (4., Icon::Cog, "Settings", true, &mut actions.settings),
+            ] {
+                let open = matches!(icon, Icon::Profiles) && profiles_open;
+                let r = slot(n);
+                let sense = if enabled {
+                    Sense::click()
+                } else {
+                    Sense::hover()
+                };
+                let response = ui.interact(r, ui.id().with(label), sense);
+                response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, enabled, label));
+                if open || enabled && (response.hovered() || response.has_focus()) {
+                    draw.rect_filled(r.shrink2(vec2(5., 7.)), 7, LINE);
+                }
+                let tint = if open {
+                    ACCENT
+                } else if enabled {
+                    MUTED
+                } else {
+                    Color32::from_gray(78)
+                };
+                icon.paint(&draw, r.center(), tint);
+                *action = response.clicked();
+                if matches!(icon, Icon::Profiles) && !profiles_open {
+                    response.on_hover_text(label);
+                }
             }
-            Icon::Cog.paint(&draw, settings_rect.center(), MUTED);
+            let divider = slot(5.).left();
+            draw.vline(
+                divider,
+                Rangef::new(area.center().y - 10., area.center().y + 10.),
+                Stroke::new(1.0_f32, LINE),
+            );
             let maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
             let labels = [
                 "Minimise",
@@ -212,7 +268,7 @@ pub fn show(ctx: &Context, brand: TextureId, close_to_tray: bool) -> bool {
                     });
                 }
             }
-            settings.clicked()
+            actions
         })
         .inner
 }
@@ -237,7 +293,7 @@ mod tests {
                 .unwrap()
                 .maximized = Some(maximized);
             ctx.run(input, |ctx| {
-                show(ctx, TextureId::default(), true);
+                show(ctx, TextureId::default(), true, false, false, false);
             })
         };
         for (column, maximized, expected) in [

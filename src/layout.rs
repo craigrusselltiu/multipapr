@@ -19,6 +19,15 @@ impl Rect {
     pub fn bottom(self) -> f32 {
         self.y + self.h
     }
+    pub fn center(self) -> [f32; 2] {
+        [self.x + self.w / 2., self.y + self.h / 2.]
+    }
+    pub fn overlaps(self, b: Self) -> bool {
+        self.x < b.right() - 0.5
+            && b.x < self.right() - 0.5
+            && self.y < b.bottom() - 0.5
+            && b.y < self.bottom() - 0.5
+    }
     pub fn union(self, b: Self) -> Self {
         let x = self.x.min(b.x);
         let y = self.y.min(b.y);
@@ -39,6 +48,9 @@ pub struct Display {
     pub px: Rect,
     pub mm: [f32; 2],
     pub estimated: bool,
+    pub mirrors: Vec<String>,
+    #[serde(skip)]
+    pub mirror_ids: Vec<String>,
 }
 
 #[derive(Default, Clone, PartialEq, Serialize, Deserialize)]
@@ -54,17 +66,16 @@ pub struct Media {
     pub width: u32,
     pub height: u32,
 }
-// Resampling filter used by the display mapping shader. Values match the
-// shader's `upscaler` parameter; the kernels follow mpv's filter definitions.
 #[derive(Clone, Copy, Default, Debug, PartialEq, Serialize, Deserialize)]
+#[repr(u8)]
 #[serde(rename_all = "snake_case")]
 pub enum Upscaling {
-    None,
+    None = 0,
     #[default]
-    CatmullRom,
-    Spline36,
-    Lanczos,
-    EwaLanczosSharp,
+    CatmullRom = 1,
+    Spline36 = 2,
+    Lanczos = 3,
+    EwaLanczosSharp = 4,
 }
 impl Upscaling {
     pub const ALL: [Self; 5] = [
@@ -84,36 +95,246 @@ impl Upscaling {
         }
     }
 }
+fn one() -> f32 {
+    1.
+}
+
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
-pub struct Settings {
+pub struct Wallpaper {
     pub media: Media,
     pub scale: f32,
-    pub pan: [f32; 2],
-    pub calibration: BTreeMap<String, Calibration>,
+    #[serde(default = "one")]
+    pub stretch: f32,
     #[serde(default)]
-    pub upscaling: Upscaling,
+    pub center: [f32; 2],
 }
-impl Settings {
+impl Wallpaper {
     pub fn new(media: Media) -> Self {
         Self {
             media,
             scale: 1.,
-            pan: [0.; 2],
-            calibration: BTreeMap::new(),
-            upscaling: Upscaling::default(),
+            stretch: 1.,
+            center: [0.; 2],
         }
     }
+    pub fn is_empty(&self) -> bool {
+        self.media.path.as_os_str().is_empty()
+    }
+    pub fn rect(&self, pitch: f32) -> Rect {
+        let w = self.media.width as f32 * pitch * self.scale * self.stretch;
+        let h = self.media.height as f32 * pitch * self.scale;
+        let [x, y] = self.center;
+        Rect::new(x - w / 2., y - h / 2., w, h)
+    }
+    pub fn fill(&mut self, target: Rect) {
+        self.scale = 1.;
+        self.stretch = 1.;
+        self.center = target.center();
+    }
+    pub fn cover(&mut self, pitch: f32, target: Rect) {
+        self.scale =
+            (target.w / self.media.width as f32).max(target.h / self.media.height as f32) / pitch;
+        self.stretch = 1.;
+        self.center = target.center();
+    }
+}
+
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+pub struct Settings {
+    #[serde(flatten)]
+    pub wallpaper: Wallpaper,
+    #[serde(default)]
+    pub pitch: Option<f32>,
+    pub calibration: BTreeMap<String, Calibration>,
+    #[serde(default)]
+    pub upscaling: Upscaling,
+    #[serde(default)]
+    pub profile: Option<String>,
+    #[serde(default)]
+    pub display_set: String,
+    #[serde(default)]
+    pub multi: bool,
+    #[serde(default)]
+    pub screens: BTreeMap<String, Wallpaper>,
+}
+impl Settings {
+    pub fn is_empty(&self) -> bool {
+        self.wallpaper.is_empty() && self.screens.values().all(Wallpaper::is_empty)
+    }
+    pub fn new(media: Media) -> Self {
+        Self {
+            wallpaper: Wallpaper::new(media),
+            pitch: None,
+            calibration: BTreeMap::new(),
+            upscaling: Upscaling::default(),
+            profile: None,
+            display_set: String::new(),
+            multi: false,
+            screens: BTreeMap::new(),
+        }
+    }
+    pub fn shown(&self, id: &str) -> &Wallpaper {
+        match self.screens.get(id) {
+            Some(w) if self.multi => w,
+            _ => &self.wallpaper,
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Framing {
+    pub scale: f32,
+    #[serde(default = "one")]
+    pub stretch: f32,
+    pub center: [f32; 2],
+}
+
+pub const DEFAULT_PROFILE: &str = "Default";
+
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+pub struct Profile {
+    pub name: String,
+    pub media: Media,
+    #[serde(default)]
+    pub upscaling: Upscaling,
+    #[serde(default)]
+    pub framings: BTreeMap<String, Framing>,
+    #[serde(default)]
+    pub multi: bool,
+    #[serde(default)]
+    pub screens: BTreeMap<String, Wallpaper>,
+}
+impl Profile {
+    pub fn is_empty(&self) -> bool {
+        self.media.path.as_os_str().is_empty() && self.screens.values().all(Wallpaper::is_empty)
+    }
+    pub fn new(name: &str, s: &Settings, set: &str) -> Self {
+        let mut profile = Self {
+            name: name.into(),
+            media: s.wallpaper.media.clone(),
+            upscaling: s.upscaling,
+            framings: BTreeMap::new(),
+            multi: s.multi,
+            screens: BTreeMap::new(),
+        };
+        profile.record(s, set);
+        profile
+    }
+    pub fn record(&mut self, s: &Settings, set: &str) {
+        if self.media != s.wallpaper.media {
+            self.framings.clear();
+        }
+        self.media = s.wallpaper.media.clone();
+        self.upscaling = s.upscaling;
+        self.multi = s.multi;
+        self.screens = s.screens.clone();
+        let w = &s.wallpaper;
+        self.framings.insert(
+            set.into(),
+            Framing {
+                scale: w.scale,
+                stretch: w.stretch,
+                center: w.center,
+            },
+        );
+    }
+    pub fn apply(&self, s: &mut Settings, layout: &Layout, set: &str) {
+        s.wallpaper.media = self.media.clone();
+        s.upscaling = self.upscaling;
+        s.profile = Some(self.name.clone());
+        s.multi = self.multi;
+        s.screens = self.screens.clone();
+        self.apply_framing(s, layout, set);
+    }
+    fn apply_framing(&self, s: &mut Settings, layout: &Layout, set: &str) {
+        s.display_set = set.into();
+        match self.framings.get(set) {
+            Some(f) => {
+                s.wallpaper.scale = f.scale;
+                s.wallpaper.stretch = f.stretch;
+                s.wallpaper.center = f.center;
+            }
+            None => {
+                let pitch = layout.pitch(s);
+                s.wallpaper.cover(pitch, layout.bounds);
+            }
+        }
+    }
+}
+pub fn display_set(displays: &[Display]) -> String {
+    let mut ids: Vec<String> = displays
+        .iter()
+        .map(|d| {
+            let mut group = d.mirror_ids.clone();
+            group.sort_unstable();
+            group.insert(0, d.id.clone());
+            group.join("+")
+        })
+        .collect();
+    ids.sort_unstable();
+    ids.join("|")
+}
+pub fn unique_name(profiles: &[Profile], base: &str) -> String {
+    let taken = |name: &str| profiles.iter().any(|p| p.name == name);
+    if !taken(base) {
+        return base.into();
+    }
+    (2..)
+        .map(|n| format!("{base} {n}"))
+        .find(|name| !taken(name))
+        .unwrap()
+}
+pub fn ensure_default(profiles: &mut Vec<Profile>, s: &Settings, set: &str) -> bool {
+    match profiles.iter().position(|p| p.name == DEFAULT_PROFILE) {
+        Some(0) => false,
+        Some(i) => {
+            let default = profiles.remove(i);
+            profiles.insert(0, default);
+            true
+        }
+        None => {
+            profiles.insert(0, Profile::new(DEFAULT_PROFILE, s, set));
+            true
+        }
+    }
+}
+pub fn remember(profiles: &mut Vec<Profile>, s: &mut Settings, set: &str) {
+    s.display_set = set.into();
+    ensure_default(profiles, s, set);
+    let active = s
+        .profile
+        .as_ref()
+        .and_then(|name| profiles.iter().position(|p| &p.name == name));
+    let i = active.unwrap_or_else(|| {
+        s.profile = Some(DEFAULT_PROFILE.into());
+        0
+    });
+    profiles[i].record(s, set);
+}
+
+pub fn follow_displays(profiles: &mut Vec<Profile>, s: &mut Settings, layout: &Layout, set: &str) {
+    if !s.display_set.is_empty() && s.display_set != set {
+        let previous = s.display_set.clone();
+        remember(profiles, s, &previous);
+    }
+    if s.display_set != set
+        && let Some(profile) = profiles
+            .iter()
+            .find(|p| Some(&p.name) == s.profile.as_ref())
+        && profile.media == s.wallpaper.media
+    {
+        profile.apply_framing(s, layout, set);
+    }
+    remember(profiles, s, set);
 }
 
 pub struct Layout {
     pub parents: Vec<usize>,
     pub panels: Vec<Rect>,
     pub bounds: Rect,
-    pub desktop: Rect,
     pitch: f32,
 }
 
-// Preserve the nearest aligned edge or centre on the axis parallel to a seam.
 fn parallel(a: f32, aw: f32, b: f32, bw: f32, physical_a: f32, physical_b: f32) -> f32 {
     let anchor = [0., 0.5, 1.]
         .into_iter()
@@ -126,8 +347,17 @@ fn parallel(a: f32, aw: f32, b: f32, bw: f32, physical_a: f32, physical_b: f32) 
 }
 
 impl Layout {
-    // Displays are primary-first. Attach each new panel to its closest placed neighbour.
     pub fn new(displays: &[Display], calibration: &BTreeMap<String, Calibration>) -> Self {
+        Self::arrange(displays, calibration, true)
+    }
+    pub fn legacy(displays: &[Display], calibration: &BTreeMap<String, Calibration>) -> Self {
+        Self::arrange(displays, calibration, false)
+    }
+    fn arrange(
+        displays: &[Display],
+        calibration: &BTreeMap<String, Calibration>,
+        use_saved_desk: bool,
+    ) -> Self {
         let mut panels: Vec<_> = displays
             .iter()
             .map(|d| {
@@ -137,8 +367,24 @@ impl Layout {
             .collect();
         let mut placed = vec![false; displays.len()];
         let mut parents = vec![0; displays.len()];
-        placed[0] = true;
-        if let Some(c) = calibration.get(&displays[0].id) {
+        let mut saved = vec![false; displays.len()];
+        for (k, d) in displays.iter().enumerate() {
+            if let Some(position) = calibration.get(&d.id).and_then(|c| c.position) {
+                [panels[k].x, panels[k].y] = position;
+                saved[k] = use_saved_desk;
+            }
+        }
+        let root = if saved[0] {
+            0
+        } else {
+            saved.iter().position(|&s| s).unwrap_or(0)
+        };
+        placed[root] = true;
+        parents[root] = root;
+        let saved_desk = saved.iter().any(|&s| s);
+        if root == 0
+            && let Some(c) = calibration.get(&displays[0].id)
+        {
             [panels[0].x, panels[0].y] = c.position.unwrap_or(c.offset);
         }
         for _ in 1..displays.len() {
@@ -188,13 +434,40 @@ impl Layout {
             panels[j].y = pa.y + y + offset[1];
             if let Some(position) = calibration.get(&displays[j].id).and_then(|c| c.position) {
                 [panels[j].x, panels[j].y] = position;
+            } else if saved_desk
+                && calibration
+                    .get(&displays[j].id)
+                    .is_none_or(|c| c.offset == [0.; 2])
+            {
+                for _ in 0..displays.len() {
+                    let Some(o) = (0..displays.len())
+                        .filter(|&k| k != j && (saved[k] || placed[k]))
+                        .filter(|&k| panels[k].overlaps(panels[j]))
+                        .map(|k| panels[k])
+                        .next()
+                    else {
+                        break;
+                    };
+                    if x_edge >= y_edge {
+                        panels[j].x = if b.x >= a.x {
+                            o.right()
+                        } else {
+                            o.x - panels[j].w
+                        };
+                    } else {
+                        panels[j].y = if b.y >= a.y {
+                            o.bottom()
+                        } else {
+                            o.y - panels[j].h
+                        };
+                    }
+                }
             }
             placed[j] = true;
         }
         Self {
             parents,
             bounds: panels.iter().copied().reduce(Rect::union).unwrap(),
-            desktop: displays.iter().map(|d| d.px).reduce(Rect::union).unwrap(),
             pitch: panels[0].w / displays[0].px.w,
             panels,
         }
@@ -206,38 +479,48 @@ impl Layout {
         index: usize,
         delta: [f32; 2],
     ) {
-        let mut panels = self.panels.clone();
-        panels[index].x += delta[0];
-        panels[index].y += delta[1];
-        // Freeze this arrangement by monitor identity. Later Windows changes
-        // only change the pixel destinations, not the calibrated desk.
-        for (d, panel) in displays.iter().zip(&panels) {
+        self.freeze(displays, settings);
+        let p = self.panels[index];
+        settings
+            .calibration
+            .get_mut(&displays[index].id)
+            .unwrap()
+            .position = Some([p.x + delta[0], p.y + delta[1]]);
+    }
+    pub fn freeze(&self, displays: &[Display], settings: &mut Settings) {
+        for (d, panel) in displays.iter().zip(&self.panels) {
             settings
                 .calibration
                 .entry(d.id.clone())
                 .or_default()
                 .position = Some([panel.x, panel.y]);
         }
-        let bounds = panels.into_iter().reduce(Rect::union).unwrap();
-        // Media placement is relative to the centre of the display bounds.
-        settings.pan[0] += self.bounds.x - bounds.x + (self.bounds.w - bounds.w) / 2.;
-        settings.pan[1] += self.bounds.y - bounds.y + (self.bounds.h - bounds.h) / 2.;
+        settings.pitch.get_or_insert(self.pitch);
     }
-    pub fn media(&self, settings: &Settings) -> Rect {
-        let w = settings.media.width as f32 * self.pitch * settings.scale;
-        let h = settings.media.height as f32 * self.pitch * settings.scale;
-        Rect::new(
-            self.bounds.x + (self.bounds.w - w) / 2. + settings.pan[0],
-            self.bounds.y + (self.bounds.h - h) / 2. + settings.pan[1],
-            w,
-            h,
-        )
+    pub fn pitch(&self, settings: &Settings) -> f32 {
+        settings.pitch.unwrap_or(self.pitch)
     }
-    pub fn cover(&self, settings: &mut Settings) {
-        settings.scale = (self.bounds.w / settings.media.width as f32)
-            .max(self.bounds.h / settings.media.height as f32)
-            / self.pitch;
-        settings.pan = [0.; 2];
+    pub fn resize_panel(
+        &self,
+        displays: &[Display],
+        settings: &mut Settings,
+        index: usize,
+        size: [f32; 2],
+    ) {
+        self.freeze(displays, settings);
+        settings
+            .calibration
+            .get_mut(&displays[index].id)
+            .unwrap()
+            .size = Some(size.map(|n| n.max(10.)));
+    }
+    pub fn overlapping(&self, i: usize) -> Vec<usize> {
+        (0..self.panels.len())
+            .filter(|&j| j != i && self.panels[i].overlaps(self.panels[j]))
+            .collect()
+    }
+    pub fn media(&self, settings: &Settings, wallpaper: &Wallpaper) -> Rect {
+        wallpaper.rect(self.pitch(settings))
     }
 }
 #[cfg(test)]
@@ -251,6 +534,8 @@ mod tests {
             px,
             mm,
             estimated: false,
+            mirrors: Vec::new(),
+            mirror_ids: Vec::new(),
         }
     }
     #[test]
@@ -271,7 +556,6 @@ mod tests {
             )]),
         );
         assert_eq!(l.panels[1], Rect::new(-292., -92., 280., 530.));
-        assert_eq!(l.desktop, Rect::new(-1080., -240., 3640., 1920.));
     }
     #[test]
     fn moved_panels_keep_their_physical_positions_and_the_wallpaper_stays_put() {
@@ -286,7 +570,7 @@ mod tests {
             height: 2160,
         });
         let initial = Layout::new(&displays, &settings.calibration);
-        let image = initial.media(&settings);
+        let image = initial.media(&settings, &settings.wallpaper);
         let mut expected = initial.panels.clone();
         for index in [1, 0, 2] {
             let layout = Layout::new(&displays, &settings.calibration);
@@ -295,7 +579,7 @@ mod tests {
             expected[index].y -= 11.;
             let moved = Layout::new(&displays, &settings.calibration);
             assert_eq!(moved.panels, expected);
-            assert_eq!(moved.media(&settings), image);
+            assert_eq!(moved.media(&settings, &settings.wallpaper), image);
         }
         let restored: Settings =
             serde_json::from_slice(&serde_json::to_vec(&settings).unwrap()).unwrap();
@@ -306,7 +590,7 @@ mod tests {
             refreshed.panels,
             vec![expected[0], expected[2], expected[1]]
         );
-        assert_eq!(refreshed.media(&restored), image);
+        assert_eq!(refreshed.media(&restored, &restored.wallpaper), image);
     }
     #[test]
     fn native_scale_and_cover() {
@@ -317,8 +601,229 @@ mod tests {
             width: 3840,
             height: 2160,
         });
-        assert_eq!(l.media(&s).w, l.bounds.w * 2.);
-        l.cover(&mut s);
-        assert_eq!(l.media(&s), l.bounds);
+        assert_eq!(l.media(&s, &s.wallpaper).w, l.bounds.w * 2.);
+        s.wallpaper.cover(l.pitch(&s), l.bounds);
+        assert_eq!(l.media(&s, &s.wallpaper), l.bounds);
+    }
+    #[test]
+    fn connecting_a_display_leaves_the_wallpaper_and_moved_panels_in_place() {
+        let a = display("a", Rect::new(0., 0., 1920., 1080.), [480., 270.]);
+        let b = display("b", Rect::new(1920., 0., 1920., 1080.), [480., 270.]);
+        let mut s = Settings::new(Media {
+            path: "clip".into(),
+            width: 3840,
+            height: 1080,
+        });
+        let single = Layout::new(std::slice::from_ref(&a), &s.calibration);
+        s.wallpaper.cover(single.pitch(&s), single.bounds);
+        single.move_panel(std::slice::from_ref(&a), &mut s, 0, [-60., 0.]);
+        let image = single.media(&s, &s.wallpaper);
+        let both = Layout::new(&[a.clone(), b], &s.calibration);
+        assert_eq!(both.media(&s, &s.wallpaper), image);
+        assert_eq!(both.panels[0], Rect::new(-60., 0., 480., 270.));
+        assert_eq!(both.panels[1], Rect::new(420., 0., 480., 270.));
+        assert!(both.overlapping(1).is_empty());
+    }
+    #[test]
+    fn a_new_display_slides_clear_of_a_moved_panel() {
+        let displays = [
+            display("a", Rect::new(0., 0., 1920., 1080.), [480., 270.]),
+            display("b", Rect::new(1920., 0., 1920., 1080.), [480., 270.]),
+            display("c", Rect::new(3840., 0., 1920., 1080.), [480., 270.]),
+        ];
+        let at = |x: f32| Calibration {
+            position: Some([x, 0.]),
+            ..Default::default()
+        };
+        let calibration = BTreeMap::from([("a".into(), at(500.)), ("b".into(), at(0.))]);
+        let l = Layout::new(&displays, &calibration);
+        assert_eq!(l.panels[2], Rect::new(980., 0., 480., 270.));
+        assert!((0..3).all(|i| l.overlapping(i).is_empty()));
+    }
+    #[test]
+    fn unplugging_the_primary_display_leaves_the_rest_of_the_desk() {
+        let a = display("a", Rect::new(0., 0., 1920., 1080.), [480., 270.]);
+        let b = display("b", Rect::new(1920., -420., 1080., 1920.), [300., 530.]);
+        let mut s = Settings::new(Media {
+            path: "clip".into(),
+            width: 3840,
+            height: 2160,
+        });
+        let displays = [a, b.clone()];
+        let both = Layout::new(&displays, &s.calibration);
+        s.wallpaper.cover(both.pitch(&s), both.bounds);
+        both.freeze(&displays, &mut s);
+        let image = both.media(&s, &s.wallpaper);
+        let mut alone = b;
+        alone.px.x = 0.;
+        alone.primary = true;
+        let after = Layout::new(&[alone], &s.calibration);
+        assert_eq!(after.panels[0], both.panels[1]);
+        assert_eq!(after.media(&s, &s.wallpaper), image);
+    }
+    #[test]
+    fn profiles_remember_a_framing_for_each_display_set() {
+        let a = display("a", Rect::new(0., 0., 1920., 1080.), [480., 270.]);
+        let b = display("b", Rect::new(1920., 0., 1920., 1080.), [480., 270.]);
+        let mut s = Settings::new(Media {
+            path: "city.mp4".into(),
+            width: 3840,
+            height: 1080,
+        });
+        s.wallpaper.scale = 0.5;
+        let mut profiles = Vec::new();
+        let alone = display_set(std::slice::from_ref(&a));
+        remember(&mut profiles, &mut s, &alone);
+        assert_eq!(s.profile.as_deref(), Some("Default"));
+        let docked = [a.clone(), b];
+        let layout = Layout::new(&docked, &s.calibration);
+        profiles[0].apply(&mut s, &layout, &display_set(&docked));
+        assert_eq!(
+            layout.media(&s, &s.wallpaper),
+            Rect::new(0., 0., 960., 270.)
+        );
+        s.wallpaper.center = [500., 100.];
+        remember(&mut profiles, &mut s, &display_set(&docked));
+        let single = Layout::new(std::slice::from_ref(&a), &s.calibration);
+        profiles[0].apply(&mut s, &single, &alone);
+        assert_eq!((s.wallpaper.scale, s.wallpaper.center), (0.5, [0., 0.]));
+        profiles[0].apply(&mut s, &layout, &display_set(&docked));
+        assert_eq!(s.wallpaper.center, [500., 100.]);
+        s.wallpaper.media.path = "forest.png".into();
+        remember(&mut profiles, &mut s, &alone);
+        assert_eq!(profiles[0].framings.len(), 1);
+        assert_eq!(unique_name(&profiles, "Default"), "Default 2");
+    }
+    #[test]
+    fn default_profile_comes_first_and_is_reused() {
+        let mut s = Settings::new(Media {
+            path: "night.png".into(),
+            width: 100,
+            height: 100,
+        });
+        let mut profiles = vec![Profile::new("Night", &s, "a")];
+        remember(&mut profiles, &mut s, "a");
+        let names = |p: &[Profile]| p.iter().map(|p| p.name.clone()).collect::<Vec<_>>();
+        assert_eq!(names(&profiles), ["Default", "Night"]);
+        assert_eq!(s.profile.as_deref(), Some(DEFAULT_PROFILE));
+        s.profile = Some("Gone".into());
+        remember(&mut profiles, &mut s, "a");
+        assert_eq!(names(&profiles), ["Default", "Night"]);
+        let mut moved = vec![profiles[1].clone(), profiles[0].clone()];
+        assert!(ensure_default(&mut moved, &s, "a"));
+        assert_eq!(names(&moved), ["Default", "Night"]);
+    }
+    #[test]
+    fn following_monitors_preserves_newer_layout_edits_and_distinguishes_duplicate_mode() {
+        let mut a = display("a", Rect::new(0., 0., 1920., 1080.), [480., 270.]);
+        let layout = Layout::new(std::slice::from_ref(&a), &BTreeMap::new());
+        let mut s = Settings::new(Media {
+            path: "old.png".into(),
+            width: 1920,
+            height: 1080,
+        });
+        let mut profiles = Vec::new();
+        remember(&mut profiles, &mut s, "a");
+        s.wallpaper.media.path = "new.png".into();
+        s.wallpaper.center = [10., 20.];
+        follow_displays(&mut profiles, &mut s, &layout, "a");
+        assert_eq!(s.wallpaper.media.path.to_str(), Some("new.png"));
+        assert_eq!(s.wallpaper.center, [10., 20.]);
+        assert_eq!(profiles[0].media.path, s.wallpaper.media.path);
+        a.mirror_ids.push("b".into());
+        let duplicated = display_set(std::slice::from_ref(&a));
+        assert_ne!(duplicated, "a");
+        assert_ne!(duplicated, "a|b");
+        follow_displays(&mut profiles, &mut s, &layout, &duplicated);
+        assert_eq!(s.wallpaper.center, layout.bounds.center());
+        follow_displays(&mut profiles, &mut s, &layout, "a");
+        assert_eq!(s.wallpaper.center, [10., 20.]);
+        let old = br#"{"name":"Old","media":{"path":"wall","width":100,"height":100},"framings":{"a":{"scale":2,"center":[0,0]}}}"#;
+        let p: Profile = serde_json::from_slice(old).unwrap();
+        assert!(!p.multi && p.screens.is_empty());
+        assert_eq!(p.framings["a"].stretch, 1.);
+        assert!(
+            serde_json::from_slice::<Vec<Profile>>(&serde_json::to_vec(&profiles).unwrap())
+                .unwrap()
+                == profiles
+        );
+    }
+    #[test]
+    fn stretching_changes_width_only_and_fitting_undoes_it() {
+        let mut w = Wallpaper::new(Media {
+            path: "wide.png".into(),
+            width: 200,
+            height: 100,
+        });
+        w.stretch = 2.;
+        let r = w.rect(1.);
+        assert_eq!((r.w, r.h), (400., 100.));
+        w.cover(1., Rect::new(0., 0., 100., 100.));
+        assert_eq!(w.stretch, 1.);
+        assert_eq!(w.rect(1.), Rect::new(-50., 0., 200., 100.));
+    }
+    #[test]
+    fn a_new_primary_display_joins_the_saved_desk() {
+        let displays = [
+            display("b", Rect::new(0., 0., 1920., 1080.), [480., 270.]),
+            display("a", Rect::new(1920., 0., 1920., 1080.), [480., 270.]),
+        ];
+        let calibration = BTreeMap::from([(
+            "a".into(),
+            Calibration {
+                position: Some([0., 0.]),
+                ..Default::default()
+            },
+        )]);
+        let l = Layout::new(&displays, &calibration);
+        assert_eq!(
+            l.panels,
+            vec![
+                Rect::new(-480., 0., 480., 270.),
+                Rect::new(0., 0., 480., 270.)
+            ]
+        );
+        let old = Layout::legacy(&displays, &calibration);
+        assert_eq!(old.panels[0], old.panels[1]);
+    }
+    #[test]
+    fn a_new_display_avoids_saved_panels_placed_after_it() {
+        let displays = [
+            display("a", Rect::new(0., 0., 1920., 1080.), [480., 270.]),
+            display("b", Rect::new(1920., 0., 1920., 1080.), [480., 270.]),
+            display("c", Rect::new(3840., 0., 1920., 1080.), [480., 270.]),
+        ];
+        let at = |x: f32| Calibration {
+            position: Some([x, 0.]),
+            ..Default::default()
+        };
+        let calibration = BTreeMap::from([("a".into(), at(0.)), ("c".into(), at(480.))]);
+        let l = Layout::new(&displays, &calibration);
+        assert_eq!(l.panels[1], Rect::new(960., 0., 480., 270.));
+        assert!((0..3).all(|i| l.overlapping(i).is_empty()));
+    }
+
+    #[test]
+    fn two_new_displays_choose_distinct_positions_on_a_saved_desk() {
+        let displays: Vec<_> = ["a", "b", "c", "d"]
+            .into_iter()
+            .enumerate()
+            .map(|(i, id)| {
+                display(
+                    id,
+                    Rect::new(1920. * i as f32, 0., 1920., 1080.),
+                    [480., 270.],
+                )
+            })
+            .collect();
+        let at_origin = Calibration {
+            position: Some([0., 0.]),
+            ..Default::default()
+        };
+        let calibration =
+            BTreeMap::from([("a".into(), at_origin.clone()), ("c".into(), at_origin)]);
+        let l = Layout::new(&displays, &calibration);
+        assert_eq!(l.panels[0], l.panels[2]);
+        assert!(l.overlapping(1).is_empty() && l.overlapping(3).is_empty());
     }
 }

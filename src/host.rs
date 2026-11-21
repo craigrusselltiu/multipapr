@@ -1,14 +1,16 @@
 use crate::{
     desktop::{self, Handle, Surface, wide},
     displays,
-    layout::{Display, Layout, Rect, Settings},
-    shader, storage,
+    layout::{Display, Layout, Rect, Settings, display_set, follow_displays},
+    shader::{self, Part},
+    storage,
     tray::{self, Tray},
     update,
 };
 use anyhow::{Context, Result, ensure};
 use std::{
     fs,
+    hash::{DefaultHasher, Hash, Hasher},
     io::{self, Write},
     os::windows::io::AsRawHandle,
     path::{Path, PathBuf},
@@ -50,8 +52,6 @@ pub fn stop() -> Result<()> {
         Ok(())
     }
 }
-/// Signals the running host to shut down cleanly and relaunch the updated executable.
-/// Returns `Ok(false)` if no host process is running (e.g. standalone `--editor`).
 pub fn relaunch() -> Result<bool> {
     unsafe {
         let event = OpenEventW(EVENT_MODIFY_STATE, 0, wide(RELAUNCH).as_ptr());
@@ -120,19 +120,19 @@ struct EditorProcess(Option<ManagedChild>);
 
 impl EditorProcess {
     fn open(&mut self, exe: &Path) -> Result<()> {
-        if let Some(editor) = self.0.as_mut() {
-            if editor.child.try_wait()?.is_none() {
-                let hwnd = editor_window(editor.child.id());
-                if !hwnd.is_null() {
-                    unsafe {
-                        if IsIconic(hwnd) != 0 {
-                            ShowWindowAsync(hwnd, SW_RESTORE);
-                        }
-                        SetForegroundWindow(GetLastActivePopup(hwnd));
+        if let Some(editor) = self.0.as_mut()
+            && editor.child.try_wait()?.is_none()
+        {
+            let hwnd = editor_window(editor.child.id());
+            if !hwnd.is_null() {
+                unsafe {
+                    if IsIconic(hwnd) != 0 {
+                        ShowWindowAsync(hwnd, SW_RESTORE);
                     }
+                    SetForegroundWindow(GetLastActivePopup(hwnd));
                 }
-                return Ok(());
             }
+            return Ok(());
         }
         let editor = ManagedChild::spawn(
             storage::command(exe)
@@ -147,11 +147,15 @@ impl EditorProcess {
         Ok(())
     }
 
+    fn running(&self) -> bool {
+        self.0.is_some()
+    }
+
     fn reap(&mut self) -> Result<()> {
-        if let Some(editor) = self.0.as_mut() {
-            if editor.child.try_wait()?.is_some() {
-                self.0 = None;
-            }
+        if let Some(editor) = self.0.as_mut()
+            && editor.child.try_wait()?.is_some()
+        {
+            self.0 = None;
         }
         Ok(())
     }
@@ -201,39 +205,62 @@ fn editor_window(pid: u32) -> HWND {
     search.hwnd
 }
 
-pub fn player_pipe(host_id: u32) -> PathBuf {
-    PathBuf::from(format!(r"\\.\pipe\multipapr-player-{host_id}"))
+pub fn player_pipe(host_id: u32, part: &Part, displays: &[Display]) -> PathBuf {
+    let mut hash = DefaultHasher::new();
+    part.media.hash(&mut hash);
+    for &i in &part.displays {
+        let d = &displays[i];
+        d.id.hash(&mut hash);
+        [d.px.x, d.px.y, d.px.w, d.px.h]
+            .map(f32::to_bits)
+            .hash(&mut hash);
+    }
+    PathBuf::from(format!(
+        r"\\.\pipe\multipapr-player-{host_id}-{:016x}",
+        hash.finish()
+    ))
 }
 
-pub fn update_mapping(pipe: &Path, layout: &Layout, settings: &Settings) -> Result<()> {
+pub fn update_mapping(pipe: &Path, parameters: &str) -> Result<()> {
+    set_player_property(pipe, "glsl-shader-opts", parameters)
+}
+fn set_player_property(pipe: &Path, name: &str, value: impl serde::Serialize) -> Result<()> {
     let mut ipc = fs::OpenOptions::new().read(true).write(true).open(pipe)?;
     writeln!(
         ipc,
         "{}",
-        serde_json::json!({"command":["set_property","glsl-shader-opts", shader::parameters(layout, settings)]})
+        serde_json::json!({"command":["set_property", name, value]})
     )?;
     Ok(())
 }
 
 struct Player {
-    media: PathBuf,
+    part: Part,
+    log: String,
     process: ManagedChild,
     surface: Surface,
     pipe: PathBuf,
     desktop: Rect,
     covered: bool,
+    pending_mapping: Option<String>,
 }
 impl Player {
-    fn open(settings: &Settings, displays: &[Display]) -> Result<Self> {
+    fn open(n: usize, part: &Part, settings: &Settings, displays: &[Display]) -> Result<Self> {
+        ensure!(
+            part.media.is_file(),
+            "Cannot find wallpaper {}",
+            part.media.display()
+        );
         let layout = Layout::new(displays, &settings.calibration);
         let dir = storage::home()?;
-        let shader_path = dir.join("layout.glsl");
-        fs::write(&shader_path, shader::generate(displays, &layout))?;
+        let shader_path = dir.join(format!("layout-{n}.glsl"));
+        fs::write(&shader_path, shader::generate(displays, part))?;
         let profile = dir.join("playback.conf");
-        fs::write(&profile, include_bytes!("../assets/playback.conf"))?;
-        let surface = Surface::create(layout.desktop)?;
-        let pipe = player_pipe(std::process::id());
-        let log = fs::File::create(dir.join("player.log"))?;
+        let desktop = part.desktop(displays);
+        let surface = Surface::create(desktop)?;
+        let pipe = player_pipe(std::process::id(), part, displays);
+        let log_name = format!("player-{n}.log");
+        let log = fs::File::create(dir.join(&log_name))?;
         let mut command = storage::command(storage::ensure_mpv()?);
         command
             .args([
@@ -265,7 +292,7 @@ impl Player {
             .arg(format!("--glsl-shader={}", shader_path.display()))
             .arg(format!(
                 "--glsl-shader-opts={}",
-                shader::parameters(&layout, settings)
+                shader::parameters(&layout, settings, displays, part)
             ))
             .arg(format!("--input-ipc-server={}", pipe.display()))
             .stdin(Stdio::null())
@@ -273,39 +300,34 @@ impl Player {
             .stderr(log)
             .arg("--msg-level=all=warn")
             .arg("--")
-            .arg(&settings.media.path);
+            .arg(&part.media);
         let process = ManagedChild::spawn(&mut command).context("Cannot launch mpv")?;
         Ok(Self {
-            media: settings.media.path.clone(),
+            part: part.clone(),
+            log: log_name,
             process,
             surface,
             pipe,
-            desktop: layout.desktop,
+            desktop,
             covered: false,
+            pending_mapping: None,
         })
     }
     fn update(&mut self) -> Result<()> {
-        ensure!(
-            self.surface.valid(),
-            "Explorer recreated the wallpaper surface"
-        );
+        self.surface.maintain(self.desktop)?;
         if let Some(status) = self.process.child.try_wait()? {
-            anyhow::bail!("Wallpaper player exited ({status}). See player.log");
+            anyhow::bail!("Wallpaper player exited ({status}). See {}", self.log);
+        }
+        if let Some(parameters) = &self.pending_mapping
+            && update_mapping(&self.pipe, parameters).is_ok()
+        {
+            self.pending_mapping = None;
         }
         let covered = desktop::locked_or_covered(self.desktop);
-        if covered != self.covered {
-            if let Ok(mut ipc) = fs::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open(&self.pipe)
-            {
-                writeln!(
-                    ipc,
-                    "{}",
-                    serde_json::json!({"command":["set_property","user-data/multipapr/covered",covered]})
-                )?;
-                self.covered = covered;
-            }
+        if covered != self.covered
+            && set_player_property(&self.pipe, "user-data/multipapr/covered", covered).is_ok()
+        {
+            self.covered = covered;
         }
         Ok(())
     }
@@ -338,10 +360,14 @@ pub fn run(mut show_editor: bool) -> Result<()> {
         let mut tray = Tray::new()?;
         let mut editor = EditorProcess::default();
         let dir = storage::home()?;
+        fs::write(
+            dir.join("playback.conf"),
+            include_bytes!("../assets/playback.conf"),
+        )?;
         let config = dir.join("layout.json");
         let mut stamp = None;
         let mut topology = Vec::new();
-        let mut player: Option<Player> = None;
+        let mut players: Vec<Option<Player>> = Vec::new();
         let mut next = Instant::now();
         let mut recheck = Instant::now();
         let mut displays = Vec::new();
@@ -353,45 +379,104 @@ pub fn run(mut show_editor: bool) -> Result<()> {
                 None => {}
             }
             tray.update();
+            if tray.displays_changed() {
+                recheck = Instant::now();
+                next = recheck;
+            }
             if show_editor {
                 editor.open(&exe)?;
             }
             let now = Instant::now();
             if now >= next {
+                let editor_was_open = editor.running();
                 editor.reap()?;
                 let result = (|| -> Result<()> {
-                    let new_stamp = version(&config);
+                    let mut new_stamp = version(&config);
                     if new_stamp.is_none() {
-                        drop(player.take());
+                        players.clear();
+                        stamp = None;
                         return Ok(());
                     }
                     if now >= recheck || displays.is_empty() {
                         displays = displays::detect()?;
                         recheck = now + Duration::from_secs(4);
                     }
-                    if player.is_none() || new_stamp != stamp || topology != displays {
-                        let settings = storage::load()?;
-                        if settings.media.path.as_os_str().is_empty() {
-                            drop(player.take());
-                            return Ok(());
+                    let follow = !editor.running() && (editor_was_open || topology != displays);
+                    let changed = new_stamp != stamp || topology != displays;
+                    let mut error = None;
+                    if follow || changed {
+                        let mut settings = storage::load()?;
+                        if !editor.running() {
+                            let mut next = settings.clone();
+                            let layout = Layout::new(&displays, &next.calibration);
+                            if let Ok(mut profiles) = storage::load_profiles() {
+                                let before = profiles.clone();
+                                follow_displays(
+                                    &mut profiles,
+                                    &mut next,
+                                    &layout,
+                                    &display_set(&displays),
+                                );
+                                if profiles != before
+                                    && let Err(e) = storage::save_profiles(&profiles)
+                                {
+                                    error = Some(e.context("Cannot save profiles"));
+                                }
+                            } else {
+                                next.display_set = display_set(&displays);
+                            }
+                            if !shader::plan(&next, &displays).is_empty() {
+                                layout.freeze(&displays, &mut next);
+                            }
+                            if next != settings && error.is_none() {
+                                if let Err(e) = storage::save("layout.json", &next) {
+                                    error = Some(e.context("Cannot save layout"));
+                                } else {
+                                    new_stamp = version(&config);
+                                }
+                            }
+                            settings = next;
                         }
-                        if let Some(current) = player
-                            .as_ref()
-                            .filter(|p| topology == displays && p.media == settings.media.path)
-                        {
-                            update_mapping(
-                                &current.pipe,
-                                &Layout::new(&displays, &settings.calibration),
-                                &settings,
-                            )?;
-                        } else {
-                            drop(player.take());
-                            player = Some(Player::open(&settings, &displays)?);
+                        let plan = shader::plan(&settings, &displays);
+                        if topology != displays {
+                            players.clear();
+                        }
+                        players.resize_with(displays.len(), || None);
+                        for (i, slot) in players.iter_mut().enumerate() {
+                            if slot.as_ref().is_some_and(|p| {
+                                !plan
+                                    .iter()
+                                    .any(|part| part.displays[0] == i && *part == p.part)
+                            }) {
+                                *slot = None;
+                            }
+                        }
+                        let layout = Layout::new(&displays, &settings.calibration);
+                        for part in &plan {
+                            let n = part.displays[0];
+                            let slot = &mut players[n];
+                            if let Some(p) = slot {
+                                p.pending_mapping =
+                                    Some(shader::parameters(&layout, &settings, &displays, part));
+                            } else {
+                                match Player::open(n, part, &settings, &displays) {
+                                    Ok(p) => *slot = Some(p),
+                                    Err(e) => error = Some(e),
+                                }
+                            }
                         }
                         stamp = new_stamp;
                         topology.clone_from(&displays);
                     }
-                    player.as_mut().unwrap().update()
+                    for slot in &mut players {
+                        if let Some(p) = slot
+                            && let Err(e) = p.update()
+                        {
+                            *slot = None;
+                            error = Some(e);
+                        }
+                    }
+                    error.map_or(Ok(()), Err)
                 })();
                 match result {
                     Ok(()) => {
@@ -402,7 +487,7 @@ pub fn run(mut show_editor: bool) -> Result<()> {
                         next = now + Duration::from_secs(1);
                     }
                     Err(error) => {
-                        drop(player.take());
+                        stamp = None;
                         let msg = format!("{error:#}");
                         if last_error != msg {
                             let _ = fs::write(dir.join("host-error.txt"), &msg);

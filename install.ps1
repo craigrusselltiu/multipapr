@@ -1,6 +1,3 @@
-# Install Multipapr for the current Windows user.
-# One-command install:
-#   irm https://raw.githubusercontent.com/craigrusselltiu/multipapr/main/install.ps1 | iex
 [CmdletBinding()]
 param(
     [switch]$FromSource,
@@ -11,7 +8,7 @@ $ErrorActionPreference = 'Stop'
 $repo = 'craigrusselltiu/multipapr'
 $installDir = Join-Path $env:LOCALAPPDATA 'Multipapr'
 $installed = Join-Path $installDir 'multipapr.exe'
-$mpvDir = Join-Path $installDir 'tools\mpv'  # legacy download location
+$legacyMpvDir = Join-Path $installDir 'tools\mpv'
 
 $localRepo = $PSScriptRoot -and (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'Cargo.toml'))
 $buildFromSource = $FromSource -or ($localRepo -and -not $FromRelease)
@@ -24,7 +21,7 @@ try {
         if (-not $localRepo) {
             throw 'Run .\install.ps1 -FromSource from a cloned multipapr repository.'
         }
-        if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
+        if (-not $ExecutionContext.InvokeCommand.GetCommand('cargo', [System.Management.Automation.CommandTypes]::All)) {
             throw 'Missing cargo. Install Rust (https://rustup.rs) or run with -FromRelease.'
         }
         Push-Location $PSScriptRoot
@@ -50,7 +47,7 @@ try {
         $binary = $tempBinary
     }
 
-    $hosts = @(Get-Process multipapr -ErrorAction SilentlyContinue | Where-Object Path -eq $installed)
+    $hosts = @([Diagnostics.Process]::GetProcessesByName('multipapr') | Where-Object Path -eq $installed)
     if ($hosts) {
         Start-Process -FilePath $installed -ArgumentList '--stop' -WindowStyle Hidden -Wait
         foreach ($process in $hosts) {
@@ -60,8 +57,9 @@ try {
         }
     }
 
-    # mpv is now bundled in multipapr.exe; remove the copy older installers downloaded.
-    Remove-Item -LiteralPath $mpvDir -Recurse -Force -ErrorAction SilentlyContinue
+    if (Test-Path -LiteralPath $legacyMpvDir) {
+        Remove-Item -LiteralPath $legacyMpvDir -Recurse -Force -ErrorAction Continue
+    }
 
     Copy-Item -LiteralPath $binary -Destination $installed -Force
 
@@ -92,9 +90,11 @@ try {
 public static extern void SHChangeNotify(int change, uint flags, string path, System.IntPtr other);
 '@
     }
-    # SHCNE_UPDATEITEM with SHCNF_PATHW | SHCNF_FLUSH refreshes these items in Explorer.
+    $shcneUpdateItem = 0x2000
+    $shcnfPathW = 0x0005
+    $shcnfFlush = 0x1000
     foreach ($item in $iconPath, $installed, $link) {
-        [Multipapr.Shell]::SHChangeNotify(0x2000, 0x1005, $item, [IntPtr]::Zero)
+        [Multipapr.Shell]::SHChangeNotify($shcneUpdateItem, ($shcnfPathW -bor $shcnfFlush), $item, [IntPtr]::Zero)
     }
 
     if ($hosts -and (Test-Path -LiteralPath (Join-Path $installDir 'layout.json'))) {

@@ -33,7 +33,8 @@ fn hardware(id: &str) -> Option<Panel> {
     let mut name = String::new();
     let mut timing_size = None;
     let mut native_aspect = None;
-    for d in data[54..126].chunks_exact(18) {
+    let (descriptors, _) = data[54..126].as_chunks::<18>();
+    for d in descriptors {
         if d[..2] != [0, 0] {
             if data[24] & 2 != 0 && native_aspect.is_none() {
                 let width = d[2] as u32 | ((d[4] as u32 & 0xf0) << 4);
@@ -60,17 +61,15 @@ fn hardware(id: &str) -> Option<Panel> {
         return None;
     }
     let mut estimated = false;
-    if let Some(aspect) = native_aspect {
-        if (size[0] / size[1] / aspect - 1.).abs() > 0.03 {
-            // Keep the reported long edge and infer the short edge from the
-            // preferred timing, assuming a square-pixel panel.
-            if aspect >= 1. {
-                size[1] = size[0] / aspect;
-            } else {
-                size[0] = size[1] * aspect;
-            }
-            estimated = true;
+    if let Some(aspect) = native_aspect
+        && (size[0] / size[1] / aspect - 1.).abs() > 0.03
+    {
+        if aspect >= 1. {
+            size[1] = size[0] / aspect;
+        } else {
+            size[0] = size[1] * aspect;
         }
+        estimated = true;
     }
     Some(Panel {
         name,
@@ -102,13 +101,33 @@ pub fn detect() -> Result<Vec<Display>> {
             {
                 continue;
             }
-            let mut monitor: DISPLAY_DEVICEW = std::mem::zeroed();
-            monitor.cb = size_of::<DISPLAY_DEVICEW>() as u32;
-            EnumDisplayDevicesW(adapter.DeviceName.as_ptr(), 0, &mut monitor, 1);
+            let mut monitors = Vec::new();
+            for j in 0.. {
+                let mut monitor: DISPLAY_DEVICEW = std::mem::zeroed();
+                monitor.cb = size_of::<DISPLAY_DEVICEW>() as u32;
+                if EnumDisplayDevicesW(adapter.DeviceName.as_ptr(), j, &mut monitor, 1) == 0 {
+                    break;
+                }
+                if monitor.StateFlags & DISPLAY_DEVICE_ACTIVE != 0 {
+                    monitors.push(monitor);
+                }
+            }
+            let monitor = monitors.first().copied().unwrap_or(std::mem::zeroed());
             let mut id = string(&monitor.DeviceID);
             if id.is_empty() {
                 id = string(&adapter.DeviceName);
             }
+            let mirrors = monitors
+                .iter()
+                .skip(1)
+                .map(|m| {
+                    let id = string(&m.DeviceID);
+                    hardware(&id)
+                        .map(|p| p.name)
+                        .filter(|n| !n.is_empty())
+                        .unwrap_or_else(|| string(&m.DeviceString))
+                })
+                .collect();
             let state = mode.Anonymous1.Anonymous2;
             let Panel {
                 mut name,
@@ -147,6 +166,12 @@ pub fn detect() -> Result<Vec<Display>> {
                 ),
                 mm,
                 estimated,
+                mirrors,
+                mirror_ids: monitors
+                    .iter()
+                    .skip(1)
+                    .map(|m| string(&m.DeviceID))
+                    .collect(),
             });
         }
     }

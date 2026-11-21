@@ -49,12 +49,16 @@ irm https://raw.githubusercontent.com/craigrusselltiu/multipapr/main/install.ps1
 </p>
 
 1. **Pick a wallpaper.** Drop or browse for a video (MP4, MOV, MKV, WebM) or image (PNG, JPEG, WebP, BMP).
-2. **Frame it.** Drag to move, pull a corner to resize, or use **Fill**, **Fit** and **Upscaling** in the sidebar.
-3. **Align your displays.** Switch to the monitor tool and drag each screen to match your desk, or enter exact millimetre gaps (including bezels) under **Advanced**. Changes apply live.
+2. **Frame it.** Drag to move, pull the corner to resize or an edge to stretch, or use **Fill**, **Fit** and **Upscaling** in the sidebar.
+3. **Align your displays.** Drag each screen to match your desk and resize it from its corner or edges, or enter exact millimetre sizes and gaps (including bezels) under **Advanced**. Overlaps are hatched. Changes apply live.
 4. **Close the window.** Multipapr keeps playing from the tray by default and starts at sign-in.
 
 <table>
-  <tr><td><b>Canvas</b></td><td>Drag empty space or middle-drag to pan. Scroll to zoom. <b>Reset scale</b> reframes.</td></tr>
+  <tr><td><b>Canvas</b></td><td>Drag empty space or middle-drag to pan. Scroll to zoom. <b>Reset scale</b> in the corner reframes.</td></tr>
+  <tr><td><b>Undo</b></td><td><kbd>Ctrl</kbd>+<kbd>Z</kbd> to undo, <kbd>Ctrl</kbd>+<kbd>Y</kbd> or <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Z</kbd> to redo, or use the arrows in the title bar.</td></tr>
+  <tr><td><b>Select</b></td><td>Click a display or wallpaper to select it. The purple outline and resize handles show what you’re editing. Click the same spot again to cycle through overlapping items, or click empty canvas to clear the selection.</td></tr>
+  <tr><td><b>Multi-mode</b></td><td>Give each display its own wallpaper. Select a display to see its full wallpaper and adjust its framing. Click empty canvas to preview every wallpaper cropped to its display. Open <b>Advanced</b> below Wallpaper for exact display sizes and offsets.</td></tr>
+  <tr><td><b>Profiles</b></td><td>The bookmark in the title bar lists your wallpaper setups. Each one remembers its framing for every combination of connected monitors and switches with them, so docking or undocking brings back the right look. Edits save automatically.</td></tr>
   <tr><td><b>Lock axis</b></td><td>Hold <kbd>Ctrl</kbd> for horizontal, <kbd>Ctrl</kbd>+<kbd>Shift</kbd> for vertical.</td></tr>
   <tr><td><b>Tray</b></td><td>Click to reopen. Right-click → <b>Close</b> to stop the wallpaper.</td></tr>
   <tr><td><b>Settings</b></td><td>Toggle <b>Start at sign-in</b>, <b>Close to system tray</b> or update Multipapr from the cog icon.</td></tr>
@@ -65,15 +69,15 @@ irm https://raw.githubusercontent.com/craigrusselltiu/multipapr/main/install.ps1
 > [!NOTE]
 > Playback uses [mpv](https://mpv.io/), which is built into the exe and unpacked once on first use.
 >
-> A single mpv instance decodes the video once, on the GPU where possible, and one shader maps it to every display. Audio, interpolation and network caching are off. Playback **pauses** when the desktop is locked or a fullscreen window covers it, and it recovers after Explorer restarts or displays change. A still image renders once and then stays idle.
+> A single mpv instance decodes the video once, on the GPU where possible, and one shader maps it to every display. Multi-mode runs one instance per display. Audio, interpolation and network caching are off. Playback **pauses** when the desktop is locked or a fullscreen window covers it, and it recovers after Explorer restarts or displays change. A still image renders once and then stays idle.
 
 ## CLI
 
 ```powershell
-multipapr.exe --apply "D:\Wallpapers\loop.mp4"   # fit a file to your displays and start it
-multipapr.exe --background                        # start in the tray
-multipapr.exe --stop                              # stop the wallpaper and quit
-multipapr.exe --displays                          # print detected displays as JSON
+multipapr.exe --apply "D:\Wallpapers\loop.mp4"
+multipapr.exe --background
+multipapr.exe --stop
+multipapr.exe --displays
 ```
 
 Settings, previews and logs live in `%LOCALAPPDATA%\Multipapr`.
@@ -95,6 +99,7 @@ cargo test --release --locked
 
 - Multipapr places its wallpaper window behind the desktop icons using a part of Explorer that Windows doesn't document, so a future Windows update could break it.
 - If a monitor reports no physical size, Multipapr assumes 96 DPI. You can correct it under **Advanced**.
+- Screens in Windows' **Duplicate** mode show the same pixels, so the wallpaper is sized for the first screen on that output.
 
 </details>
 

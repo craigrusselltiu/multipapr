@@ -160,7 +160,6 @@ fn parse_api_release(body: &[u8], current: &Version) -> Result<CheckOutcome> {
         .into_iter()
         .find(|a| a.name.eq_ignore_ascii_case(ASSET_NAME))
     else {
-        // Release exists, but multipapr.exe has not been uploaded yet.
         return Ok(CheckOutcome::Latest);
     };
     ensure!(
@@ -445,7 +444,6 @@ pub fn check_latest() -> Result<CheckOutcome> {
         return parse_api_release(&body, &current);
     }
     if response.status == HTTP_STATUS_FORBIDDEN || response.status == 429 {
-        // GitHub unauthenticated API rate limit hit; fall back to the /releases/latest redirect.
         let redirect = HttpRequest::send("HEAD", LATEST_WEB_URL, &[], false, 15_000)?;
         if matches!(
             redirect.status,
@@ -454,10 +452,9 @@ pub fn check_latest() -> Result<CheckOutcome> {
                 | HTTP_STATUS_REDIRECT_METHOD
                 | HTTP_STATUS_REDIRECT_KEEP_VERB
                 | HTTP_STATUS_PERMANENT_REDIRECT
-        ) {
-            if let Some(location) = redirect.header_string(WINHTTP_QUERY_LOCATION) {
-                return parse_redirect_release(&location, &current);
-            }
+        ) && let Some(location) = redirect.header_string(WINHTTP_QUERY_LOCATION)
+        {
+            return parse_redirect_release(&location, &current);
         }
     }
     bail!("GitHub returned HTTP {}", response.status)
@@ -476,7 +473,6 @@ pub fn download_update(
         release.download_url.starts_with(DOWNLOAD_PREFIX),
         "Unexpected update download URL"
     );
-    // Create the temporary file first so permission errors fail before downloading.
     let mut staged = NamedTempFile::new_in(target_dir)
         .context("Cannot write to the Multipapr folder")?;
     let response = HttpRequest::send("GET", &release.download_url, &[], true, 60_000)?;
@@ -567,8 +563,6 @@ fn backup_path_for(exe_path: &Path) -> Result<PathBuf> {
     bail!("Cannot pick backup path for old executable")
 }
 
-/// Atomically replaces `exe_path` with `staged` by renaming the running executable aside first.
-/// Windows allows renaming a running executable on the same volume, even while locked for execution.
 pub fn replace_executable(exe_path: &Path, staged: NamedTempFile) -> Result<()> {
     let backup = backup_path_for(exe_path)?;
     fs::rename(exe_path, &backup).context("Cannot move the running multipapr.exe aside")?;
@@ -591,17 +585,14 @@ fn remove_old_executables_in(dir: &Path, exe_name: &str) -> bool {
             .file_name()
             .and_then(|n| n.to_str())
             .is_some_and(|n| n == prefix || n.starts_with(&format!("{prefix}.")))
+            && fs::remove_file(&path).is_err()
         {
-            if fs::remove_file(&path).is_err() {
-                remaining = true;
-            }
+            remaining = true;
         }
     }
     !remaining
 }
 
-/// Removes leftover `multipapr.exe.old*` backups left by a previous self-update.
-/// Runs briefly on a background thread so a just-exiting prior process can release its file lock.
 pub fn cleanup_old_executables() {
     let Ok(exe) = env::current_exe() else {
         return;
@@ -769,7 +760,6 @@ mod tests {
 
     #[test]
     fn replaces_actively_running_windows_executable() {
-        // Verify Windows allows renaming a currently executing .exe while it runs.
         let dir = tempfile::tempdir().unwrap();
         let running_exe = dir.path().join("runner.exe");
         let system_exe = Path::new(r"C:\Windows\System32\ping.exe");
@@ -797,9 +787,9 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
-    fn live_github_release_check_succeeds() {
-        let outcome = check_latest().unwrap();
-        assert_eq!(outcome, CheckOutcome::Latest);
+    #[ignore = "requires network access to GitHub"]
+    fn live_github_release_check_succeeds() -> Result<()> {
+        check_latest()?;
+        Ok(())
     }
 }

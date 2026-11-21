@@ -1,4 +1,4 @@
-use crate::desktop::wide;
+use crate::desktop::{make_int_resource, wide};
 use anyhow::{Result, ensure};
 use std::{
     cell::Cell,
@@ -18,6 +18,7 @@ const WINDOW_CLASS: &str = "Multipapr.Tray";
 const CALLBACK: u32 = WM_APP + 1;
 const KEY_SELECT: u32 = NIN_SELECT | NINF_KEY;
 const CLOSE_ITEM: usize = 1;
+const APP_ICON_RESOURCE_ID: u16 = 1;
 
 #[derive(Clone, Copy)]
 pub enum Command {
@@ -28,6 +29,7 @@ pub enum Command {
 struct State {
     taskbar_created: u32,
     refresh: Cell<bool>,
+    displays_changed: Cell<bool>,
     version4: Cell<bool>,
     command: Cell<Option<Command>>,
 }
@@ -60,6 +62,7 @@ impl Tray {
             let state = Box::new(State {
                 taskbar_created,
                 refresh: Cell::new(false),
+                displays_changed: Cell::new(false),
                 version4: Cell::new(false),
                 command: Cell::new(None),
             });
@@ -84,14 +87,13 @@ impl Tray {
                 io::Error::last_os_error()
             );
 
-            let resource = 1usize as *const u16;
             let mut icon = NOTIFYICONDATAW {
                 cbSize: size_of::<NOTIFYICONDATAW>() as u32,
                 hWnd: hwnd,
                 uID: 1,
                 uFlags: NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_SHOWTIP,
                 uCallbackMessage: CALLBACK,
-                hIcon: LoadIconW(instance, resource),
+                hIcon: LoadIconW(instance, make_int_resource(APP_ICON_RESOURCE_ID)),
                 ..std::mem::zeroed()
             };
             for (dest, code) in icon.szTip.iter_mut().zip("Multipapr".encode_utf16()) {
@@ -120,6 +122,9 @@ impl Tray {
         }
     }
 
+    pub fn displays_changed(&self) -> bool {
+        self.state.displays_changed.replace(false)
+    }
     pub fn command(&self) -> Option<Command> {
         self.state.command.take()
     }
@@ -164,6 +169,10 @@ unsafe extern "system" fn window_proc(
                 state.refresh.set(true);
                 return 0;
             }
+            if message == WM_DISPLAYCHANGE {
+                state.displays_changed.set(true);
+                return 0;
+            }
             if message == WM_CLOSE || (message == WM_ENDSESSION && wparam != 0) {
                 state.command.set(Some(Command::Close));
                 return 0;
@@ -185,12 +194,11 @@ unsafe extern "system" fn window_proc(
                     {
                         state.command.set(Some(Command::Close));
                     }
-                } else if matches!(event, NIN_SELECT | KEY_SELECT)
-                    || (event == WM_LBUTTONUP && !state.version4.get())
+                } else if (matches!(event, NIN_SELECT | KEY_SELECT)
+                    || (event == WM_LBUTTONUP && !state.version4.get()))
+                    && !matches!(state.command.get(), Some(Command::Close))
                 {
-                    if !matches!(state.command.get(), Some(Command::Close)) {
-                        state.command.set(Some(Command::Open));
-                    }
+                    state.command.set(Some(Command::Open));
                 }
                 return 0;
             }
@@ -238,7 +246,7 @@ fn show_menu(hwnd: HWND, anchor: POINT) -> bool {
             hwnd,
             null(),
         );
-        // Let Explorer dismiss the menu normally on the next interaction.
+        // Posting a message after the tray menu closes prevents the next menu from closing immediately.
         PostMessageW(hwnd, WM_NULL, 0, 0);
         DestroyMenu(menu);
         if selected == 0 {
