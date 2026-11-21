@@ -7,7 +7,10 @@ use std::{
 };
 use windows_sys::Win32::{
     Foundation::*,
-    System::LibraryLoader::GetModuleHandleW,
+    System::{
+        LibraryLoader::GetModuleHandleW,
+        Threading::{AttachThreadInput, GetCurrentThreadId},
+    },
     UI::{Shell::*, WindowsAndMessaging::*},
 };
 
@@ -25,6 +28,7 @@ pub enum Command {
 struct State {
     taskbar_created: u32,
     refresh: Cell<bool>,
+    version4: Cell<bool>,
     command: Cell<Option<Command>>,
 }
 
@@ -56,11 +60,12 @@ impl Tray {
             let state = Box::new(State {
                 taskbar_created,
                 refresh: Cell::new(false),
+                version4: Cell::new(false),
                 command: Cell::new(None),
             });
             // Explorer broadcasts TaskbarCreated to top-level windows.
             let hwnd = CreateWindowExW(
-                WS_EX_TOOLWINDOW,
+                WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
                 class_name.as_ptr(),
                 null(),
                 WS_POPUP,
@@ -109,9 +114,8 @@ impl Tray {
             self.registered = unsafe { Shell_NotifyIconW(NIM_ADD, &self.icon) != 0 };
             if self.registered {
                 self.icon.Anonymous.uVersion = NOTIFYICON_VERSION_4;
-                unsafe {
-                    Shell_NotifyIconW(NIM_SETVERSION, &self.icon);
-                }
+                let v4 = unsafe { Shell_NotifyIconW(NIM_SETVERSION, &self.icon) != 0 };
+                self.state.version4.set(v4);
             }
         }
     }
@@ -166,27 +170,27 @@ unsafe extern "system" fn window_proc(
             }
             if message == CALLBACK {
                 let event = (lparam & 0xffff) as u32;
-                match event {
-                    NIN_SELECT | KEY_SELECT | WM_LBUTTONUP => {
-                        if !matches!(state.command.get(), Some(Command::Close)) {
-                            state.command.set(Some(Command::Open));
-                        }
+                let open_context_menu =
+                    event == WM_CONTEXTMENU || (event == WM_RBUTTONUP && !state.version4.get());
+                if open_context_menu {
+                    let mut anchor = POINT {
+                        x: (wparam as i16) as i32,
+                        y: ((wparam >> 16) as i16) as i32,
+                    };
+                    if event == WM_RBUTTONUP || (anchor.x == -1 && anchor.y == -1) {
+                        GetCursorPos(&mut anchor);
                     }
-                    WM_CONTEXTMENU | WM_RBUTTONUP => {
-                        let mut anchor = POINT {
-                            x: (wparam as i16) as i32,
-                            y: ((wparam >> 16) as i16) as i32,
-                        };
-                        if event == WM_RBUTTONUP || (anchor.x == -1 && anchor.y == -1) {
-                            GetCursorPos(&mut anchor);
-                        }
-                        if !matches!(state.command.get(), Some(Command::Close))
-                            && show_menu(hwnd, anchor)
-                        {
-                            state.command.set(Some(Command::Close));
-                        }
+                    if !matches!(state.command.get(), Some(Command::Close))
+                        && show_menu(hwnd, anchor)
+                    {
+                        state.command.set(Some(Command::Close));
                     }
-                    _ => {}
+                } else if matches!(event, NIN_SELECT | KEY_SELECT)
+                    || (event == WM_LBUTTONUP && !state.version4.get())
+                {
+                    if !matches!(state.command.get(), Some(Command::Close)) {
+                        state.command.set(Some(Command::Open));
+                    }
                 }
                 return 0;
             }
@@ -202,34 +206,37 @@ fn show_menu(hwnd: HWND, anchor: POINT) -> bool {
             return false;
         }
         AppendMenuW(menu, MF_STRING, CLOSE_ITEM, wide("Close").as_ptr());
-        let mut placement = TPMPARAMS {
-            cbSize: size_of::<TPMPARAMS>() as u32,
-            ..std::mem::zeroed()
-        };
-        let shell = GetShellWindow();
-        let anchor_window = GetAncestor(WindowFromPoint(anchor), GA_ROOT);
-        let mut shell_pid = 0;
-        let mut anchor_pid = 0;
-        GetWindowThreadProcessId(shell, &mut shell_pid);
-        GetWindowThreadProcessId(anchor_window, &mut anchor_pid);
-        // Place the menu outside the taskbar or its hidden-icons panel.
-        let placement = if shell_pid != 0
-            && anchor_pid == shell_pid
-            && anchor_window != shell
-            && GetWindowRect(anchor_window, &mut placement.rcExclude) != 0
-        {
-            &placement
+        SetWindowPos(
+            hwnd,
+            HWND_TOPMOST,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+        );
+        if SetForegroundWindow(hwnd) == 0 {
+            let fg = GetForegroundWindow();
+            let fg_thread = GetWindowThreadProcessId(fg, null_mut());
+            let my_thread = GetCurrentThreadId();
+            if fg_thread != 0 && fg_thread != my_thread {
+                AttachThreadInput(my_thread, fg_thread, 1);
+                SetForegroundWindow(hwnd);
+                AttachThreadInput(my_thread, fg_thread, 0);
+            }
+        }
+        let align = if GetSystemMetrics(SM_MENUDROPALIGNMENT) != 0 {
+            TPM_RIGHTALIGN
         } else {
-            null()
+            TPM_LEFTALIGN
         };
-        SetForegroundWindow(hwnd);
         let selected = TrackPopupMenuEx(
             menu,
-            TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON | TPM_BOTTOMALIGN | TPM_VERTICAL,
+            TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON | TPM_BOTTOMALIGN | align,
             anchor.x,
             anchor.y,
             hwnd,
-            placement,
+            null(),
         );
         // Let Explorer dismiss the menu normally on the next interaction.
         PostMessageW(hwnd, WM_NULL, 0, 0);

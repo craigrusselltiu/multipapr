@@ -5,14 +5,19 @@ mod preferences;
 use crate::{
     displays, host,
     layout::{Display, Layout, Media, Rect as World, Settings, Upscaling},
-    storage,
+    storage::{self, Preferences},
+    update,
 };
 use anyhow::Result;
 use canvas::{Camera, Drag, Tool};
 use eframe::egui::{self, *};
 use std::{
     path::PathBuf,
-    sync::mpsc::{Receiver, channel},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc::{Receiver, channel},
+    },
     time::{Duration, Instant},
 };
 
@@ -62,10 +67,25 @@ struct Imported {
     media: Media,
     image: image::RgbaImage,
 }
+struct ExitState {
+    close_to_tray: AtomicBool,
+    relaunching: AtomicBool,
+}
+impl ExitState {
+    fn new(close_to_tray: bool) -> Self {
+        Self {
+            close_to_tray: AtomicBool::new(close_to_tray),
+            relaunching: AtomicBool::new(false),
+        }
+    }
+}
 struct Editor {
     brand: TextureHandle,
+    exe: PathBuf,
     displays: Vec<Display>,
     settings: Settings,
+    preferences: Preferences,
+    exit: Arc<ExitState>,
     selected: usize,
     tool: Tool,
     drag: Option<(Drag, Pos2)>,
@@ -80,6 +100,7 @@ struct Editor {
     frame: World,
     login: bool,
     popup: Option<preferences::SettingsPopup>,
+    update: preferences::UpdateState,
     message: String,
     last_check: Instant,
     playback_error: Option<String>,
@@ -87,8 +108,11 @@ struct Editor {
 impl Editor {
     fn new(
         cc: &eframe::CreationContext<'_>,
+        exe: PathBuf,
         displays: Vec<Display>,
         settings: Settings,
+        preferences: Preferences,
+        exit: Arc<ExitState>,
         icon: &IconData,
     ) -> Self {
         chrome::install(cc);
@@ -137,7 +161,10 @@ impl Editor {
         );
         let mut app = Self {
             brand,
+            exe,
             displays,
+            preferences,
+            exit,
             selected: 0,
             tool: Tool::Wallpaper,
             drag: None,
@@ -156,6 +183,7 @@ impl Editor {
             frame: World::default(),
             login,
             popup: None,
+            update: preferences::UpdateState::default(),
             message: String::new(),
             last_check: Instant::now(),
             playback_error: None,
@@ -499,6 +527,7 @@ impl Editor {
 impl eframe::App for Editor {
     fn update(&mut self, ctx: &Context, _: &mut eframe::Frame) {
         self.collect(ctx);
+        self.poll_update(ctx);
         if self.last_check.elapsed() >= Duration::from_secs(3) {
             if let Ok(d) = displays::detect() {
                 if self.displays != d {
@@ -519,7 +548,7 @@ impl eframe::App for Editor {
         {
             self.import(path, true, ctx);
         }
-        let open_settings = chrome::show(ctx, self.brand.id());
+        let open_settings = chrome::show(ctx, self.brand.id(), self.preferences.close_to_tray);
         SidePanel::right("inspector")
             .resizable(false)
             .exact_width(286.)
@@ -547,6 +576,7 @@ impl eframe::App for Editor {
         self.sync(ctx);
         if open_settings && self.popup.is_none() {
             self.popup = Some(preferences::SettingsPopup::default());
+            self.update.start_check(ctx);
         }
         if self.popup.is_some() {
             self.show_preferences(ctx);
@@ -556,9 +586,12 @@ impl eframe::App for Editor {
         if self.saved != self.settings {
             self.persist();
         }
+        self.update.cancel();
     }
 }
 pub fn open() -> Result<()> {
+    let exe = std::env::current_exe()?;
+    update::cleanup_old_executables();
     if storage::mpv().is_err() {
         // First run: set up mpv while the window opens and the user picks a wallpaper.
         std::thread::spawn(storage::warm_up_mpv);
@@ -571,6 +604,8 @@ pub fn open() -> Result<()> {
             height: 1080,
         })
     });
+    let preferences = storage::load_preferences();
+    let exit = Arc::new(ExitState::new(preferences.close_to_tray));
     let icon = image::load_from_memory_with_format(
         include_bytes!("../multipapr.ico"),
         image::ImageFormat::Ico,
@@ -590,10 +625,25 @@ pub fn open() -> Result<()> {
             .with_icon(icon.clone()),
         ..Default::default()
     };
+    let editor_exit = Arc::clone(&exit);
     eframe::run_native(
         "Multipapr",
         options,
-        Box::new(move |cc| Ok(Box::new(Editor::new(cc, displays, settings, &icon)))),
+        Box::new(move |cc| {
+            Ok(Box::new(Editor::new(
+                cc,
+                exe,
+                displays,
+                settings,
+                preferences,
+                editor_exit,
+                &icon,
+            )))
+        }),
     )
-    .map_err(|e| anyhow::anyhow!("{e}"))
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
+    if !exit.relaunching.load(Ordering::Relaxed) && !exit.close_to_tray.load(Ordering::Relaxed) {
+        let _ = host::stop();
+    }
+    Ok(())
 }

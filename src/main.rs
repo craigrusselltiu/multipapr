@@ -7,6 +7,7 @@ mod layout;
 mod shader;
 mod storage;
 mod tray;
+mod update;
 
 use anyhow::{Context, Result};
 use std::{env, path::Path};

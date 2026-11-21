@@ -133,6 +133,32 @@ pub fn save<T: serde::Serialize>(name: &str, value: &T) -> Result<()> {
     tmp.persist(dir.join(name))?;
     Ok(())
 }
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct Preferences {
+    pub close_to_tray: bool,
+}
+impl Default for Preferences {
+    fn default() -> Self {
+        Self {
+            close_to_tray: true,
+        }
+    }
+}
+fn load_preferences_from(path: &Path) -> Preferences {
+    fs::read(path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default()
+}
+pub fn load_preferences() -> Preferences {
+    home()
+        .map(|dir| load_preferences_from(&dir.join("preferences.json")))
+        .unwrap_or_default()
+}
+pub fn save_preferences(preferences: &Preferences) -> Result<()> {
+    save("preferences.json", preferences)
+}
 pub fn load() -> Result<Settings> {
     Ok(serde_json::from_slice(&fs::read(
         home()?.join("layout.json"),
@@ -288,5 +314,20 @@ mod tests {
         assert_eq!((media.width, media.height), (2000, 1000));
         let thumb = preview(&media).unwrap();
         assert_eq!((thumb.width(), thumb.height()), (1280, 640));
+    }
+
+    #[test]
+    fn preferences_default_to_close_to_tray_and_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("preferences.json");
+        assert_eq!(load_preferences_from(&path), Preferences::default());
+        assert!(load_preferences_from(&path).close_to_tray);
+
+        fs::write(&path, r#"{"close_to_tray":false}"#).unwrap();
+        assert!(!load_preferences_from(&path).close_to_tray);
+
+        // Unknown or missing fields still fall back to defaults.
+        fs::write(&path, r#"{}"#).unwrap();
+        assert!(load_preferences_from(&path).close_to_tray);
     }
 }

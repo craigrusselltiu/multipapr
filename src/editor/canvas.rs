@@ -304,7 +304,12 @@ mod tests {
 
     #[test]
     fn display_drag_and_pan_use_separate_coordinate_spaces() {
-        use crate::layout::{Display, Media, Settings};
+        use super::super::ExitState;
+        use crate::{
+            layout::{Display, Media, Settings},
+            storage::Preferences,
+        };
+        use std::{path::PathBuf, sync::Arc};
         let ctx = Context::default();
         let cc = eframe::CreationContext::_new_kittest(ctx.clone());
         let display = Display {
@@ -322,8 +327,11 @@ mod tests {
         });
         let mut editor = Editor::new(
             &cc,
+            PathBuf::new(),
             vec![display],
             settings,
+            Preferences::default(),
+            Arc::new(ExitState::new(true)),
             &IconData {
                 width: 1,
                 height: 1,

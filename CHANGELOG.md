@@ -2,6 +2,21 @@
 
 All notable changes to this project are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## v0.1.4
+
+### Added
+
+- **Close to system tray** option in Settings (enabled by default). Turning it off makes closing the editor exit Multipapr completely, including the wallpaper and tray icon.
+- **Version indicator and in-app updater** in Settings. Opening Settings checks GitHub for a newer release; when one is available, **Update** downloads, verifies, replaces and relaunches `multipapr.exe` in place.
+
+### Changed
+
+- Redesigned the Settings dialog with grouped cards, toggle switches and descriptions.
+
+### Fixed
+
+- System tray right-click menu now opens at the cursor in front of the taskbar and hidden-icons panel.
+
 ## v0.1.3
 
 ### Added

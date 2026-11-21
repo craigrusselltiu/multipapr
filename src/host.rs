@@ -4,6 +4,7 @@ use crate::{
     layout::{Display, Layout, Rect, Settings},
     shader, storage,
     tray::{self, Tray},
+    update,
 };
 use anyhow::{Context, Result, ensure};
 use std::{
@@ -24,6 +25,7 @@ use windows_sys::Win32::{
 const INSTANCE: &str = r"Local\Multipapr.Host.v1";
 const STOP: &str = r"Local\Multipapr.Stop.v1";
 const OPEN: &str = r"Local\Multipapr.OpenEditor.v1";
+const RELAUNCH: &str = r"Local\Multipapr.Relaunch.v1";
 
 fn running() -> bool {
     unsafe {
@@ -46,6 +48,20 @@ pub fn stop() -> Result<()> {
         let event = Handle(event);
         ensure!(SetEvent(event.0) != 0, "Cannot signal wallpaper host");
         Ok(())
+    }
+}
+/// Signals the running host to shut down cleanly and relaunch the updated executable.
+/// Returns `Ok(false)` if no host process is running (e.g. standalone `--editor`).
+pub fn relaunch() -> Result<bool> {
+    unsafe {
+        let event = OpenEventW(EVENT_MODIFY_STATE, 0, wide(RELAUNCH).as_ptr());
+        if event.is_null() {
+            ensure!(!running(), "Wallpaper is starting; try again");
+            return Ok(false);
+        }
+        let event = Handle(event);
+        ensure!(SetEvent(event.0) != 0, "Cannot signal wallpaper host");
+        Ok(true)
     }
 }
 
@@ -103,7 +119,7 @@ impl Drop for ManagedChild {
 struct EditorProcess(Option<ManagedChild>);
 
 impl EditorProcess {
-    fn open(&mut self) -> Result<()> {
+    fn open(&mut self, exe: &Path) -> Result<()> {
         if let Some(editor) = self.0.as_mut() {
             if editor.child.try_wait()?.is_none() {
                 let hwnd = editor_window(editor.child.id());
@@ -119,7 +135,7 @@ impl EditorProcess {
             }
         }
         let editor = ManagedChild::spawn(
-            storage::command(std::env::current_exe()?)
+            storage::command(exe)
                 .arg("--editor")
                 .arg(std::process::id().to_string()),
         )
@@ -299,113 +315,130 @@ fn version(path: &Path) -> Option<SystemTime> {
     fs::metadata(path).ok()?.modified().ok()
 }
 pub fn run(mut show_editor: bool) -> Result<()> {
-    let open = Handle::checked(unsafe { CreateEventW(null(), 0, 0, wide(OPEN).as_ptr()) })?;
-    let mutex = unsafe { CreateMutexW(null(), 0, wide(INSTANCE).as_ptr()) };
-    let existing = unsafe { GetLastError() } == ERROR_ALREADY_EXISTS;
-    let _mutex = Handle::checked(mutex)?;
-    if existing {
-        if show_editor {
-            Tray::allow_focus();
-            ensure!(
-                unsafe { SetEvent(open.0) } != 0,
-                "Cannot signal editor request"
-            );
+    let exe = std::env::current_exe()?;
+    let should_relaunch = {
+        let open = Handle::checked(unsafe { CreateEventW(null(), 0, 0, wide(OPEN).as_ptr()) })?;
+        let mutex = unsafe { CreateMutexW(null(), 0, wide(INSTANCE).as_ptr()) };
+        let existing = unsafe { GetLastError() } == ERROR_ALREADY_EXISTS;
+        let _mutex = Handle::checked(mutex)?;
+        if existing {
+            if show_editor {
+                Tray::allow_focus();
+                ensure!(
+                    unsafe { SetEvent(open.0) } != 0,
+                    "Cannot signal editor request"
+                );
+            }
+            return Ok(());
         }
-        return Ok(());
-    }
-    let stop = Handle::checked(unsafe { CreateEventW(null(), 1, 0, wide(STOP).as_ptr()) })?;
-    let mut tray = Tray::new()?;
-    let mut editor = EditorProcess::default();
-    let dir = storage::home()?;
-    let config = dir.join("layout.json");
-    let mut stamp = None;
-    let mut topology = Vec::new();
-    let mut player: Option<Player> = None;
-    let mut next = Instant::now();
-    let mut recheck = Instant::now();
-    let mut displays = Vec::new();
-    let mut last_error = fs::read_to_string(dir.join("host-error.txt")).unwrap_or_default();
-    loop {
-        match tray.command() {
-            Some(tray::Command::Close) => break,
-            Some(tray::Command::Open) => show_editor = true,
-            None => {}
-        }
-        tray.update();
-        if show_editor {
-            editor.open()?;
-        }
-        let now = Instant::now();
-        if now >= next {
-            editor.reap()?;
-            let result = (|| -> Result<()> {
-                let new_stamp = version(&config);
-                if new_stamp.is_none() {
-                    drop(player.take());
-                    return Ok(());
-                }
-                if now >= recheck || displays.is_empty() {
-                    displays = displays::detect()?;
-                    recheck = now + Duration::from_secs(4);
-                }
-                if player.is_none() || new_stamp != stamp || topology != displays {
-                    let settings = storage::load()?;
-                    if settings.media.path.as_os_str().is_empty() {
+        update::cleanup_old_executables();
+        let stop = Handle::checked(unsafe { CreateEventW(null(), 1, 0, wide(STOP).as_ptr()) })?;
+        let relaunch =
+            Handle::checked(unsafe { CreateEventW(null(), 1, 0, wide(RELAUNCH).as_ptr()) })?;
+        let mut tray = Tray::new()?;
+        let mut editor = EditorProcess::default();
+        let dir = storage::home()?;
+        let config = dir.join("layout.json");
+        let mut stamp = None;
+        let mut topology = Vec::new();
+        let mut player: Option<Player> = None;
+        let mut next = Instant::now();
+        let mut recheck = Instant::now();
+        let mut displays = Vec::new();
+        let mut last_error = fs::read_to_string(dir.join("host-error.txt")).unwrap_or_default();
+        loop {
+            match tray.command() {
+                Some(tray::Command::Close) => break false,
+                Some(tray::Command::Open) => show_editor = true,
+                None => {}
+            }
+            tray.update();
+            if show_editor {
+                editor.open(&exe)?;
+            }
+            let now = Instant::now();
+            if now >= next {
+                editor.reap()?;
+                let result = (|| -> Result<()> {
+                    let new_stamp = version(&config);
+                    if new_stamp.is_none() {
                         drop(player.take());
                         return Ok(());
                     }
-                    if let Some(current) = player
-                        .as_ref()
-                        .filter(|p| topology == displays && p.media == settings.media.path)
-                    {
-                        update_mapping(
-                            &current.pipe,
-                            &Layout::new(&displays, &settings.calibration),
-                            &settings,
-                        )?;
-                    } else {
+                    if now >= recheck || displays.is_empty() {
+                        displays = displays::detect()?;
+                        recheck = now + Duration::from_secs(4);
+                    }
+                    if player.is_none() || new_stamp != stamp || topology != displays {
+                        let settings = storage::load()?;
+                        if settings.media.path.as_os_str().is_empty() {
+                            drop(player.take());
+                            return Ok(());
+                        }
+                        if let Some(current) = player
+                            .as_ref()
+                            .filter(|p| topology == displays && p.media == settings.media.path)
+                        {
+                            update_mapping(
+                                &current.pipe,
+                                &Layout::new(&displays, &settings.calibration),
+                                &settings,
+                            )?;
+                        } else {
+                            drop(player.take());
+                            player = Some(Player::open(&settings, &displays)?);
+                        }
+                        stamp = new_stamp;
+                        topology.clone_from(&displays);
+                    }
+                    player.as_mut().unwrap().update()
+                })();
+                match result {
+                    Ok(()) => {
+                        if !last_error.is_empty() {
+                            let _ = fs::remove_file(dir.join("host-error.txt"));
+                            last_error.clear();
+                        }
+                        next = now + Duration::from_secs(1);
+                    }
+                    Err(error) => {
                         drop(player.take());
-                        player = Some(Player::open(&settings, &displays)?);
+                        let msg = format!("{error:#}");
+                        if last_error != msg {
+                            let _ = fs::write(dir.join("host-error.txt"), &msg);
+                            last_error = msg;
+                        }
+                        next = now + Duration::from_secs(4);
                     }
-                    stamp = new_stamp;
-                    topology.clone_from(&displays);
-                }
-                player.as_mut().unwrap().update()
-            })();
-            match result {
-                Ok(()) => {
-                    if !last_error.is_empty() {
-                        let _ = fs::remove_file(dir.join("host-error.txt"));
-                        last_error.clear();
-                    }
-                    next = now + Duration::from_secs(1);
-                }
-                Err(error) => {
-                    drop(player.take());
-                    let msg = format!("{error:#}");
-                    if last_error != msg {
-                        let _ = fs::write(dir.join("host-error.txt"), &msg);
-                        last_error = msg;
-                    }
-                    next = now + Duration::from_secs(4);
                 }
             }
+            let event = desktop::dispatch(
+                &[relaunch.0, stop.0, open.0],
+                next.saturating_duration_since(Instant::now())
+                    .as_millis()
+                    .min(1000) as u32,
+            );
+            if event == WAIT_OBJECT_0 {
+                break true;
+            }
+            if event == WAIT_OBJECT_0 + 1 {
+                break false;
+            }
+            ensure!(
+                event != WAIT_FAILED,
+                "Cannot wait for tray events: {}",
+                io::Error::last_os_error()
+            );
+            show_editor = event == WAIT_OBJECT_0 + 2;
         }
-        let event = desktop::dispatch(
-            &[stop.0, open.0],
-            next.saturating_duration_since(Instant::now())
-                .as_millis()
-                .min(1000) as u32,
-        );
-        if event == WAIT_OBJECT_0 {
-            break;
+    };
+    if should_relaunch {
+        let child = storage::command(&exe)
+            .spawn()
+            .context("Cannot relaunch Multipapr")?;
+        unsafe {
+            AllowSetForegroundWindow(child.id());
         }
-        ensure!(
-            event != WAIT_FAILED,
-            "Cannot wait for tray events: {}",
-            io::Error::last_os_error()
-        );
-        show_editor = event == WAIT_OBJECT_0 + 1;
     }
     Ok(())
 }

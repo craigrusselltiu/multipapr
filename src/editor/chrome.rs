@@ -101,7 +101,7 @@ unsafe extern "system" fn window_proc(
     }
 }
 
-pub fn show(ctx: &Context, brand: TextureId) -> bool {
+pub fn show(ctx: &Context, brand: TextureId, close_to_tray: bool) -> bool {
     TopBottomPanel::top("app bar")
         .exact_height(HEIGHT)
         .frame(Frame::new().fill(PANEL))
@@ -141,7 +141,11 @@ pub fn show(ctx: &Context, brand: TextureId) -> bool {
             let labels = [
                 "Minimise",
                 if maximized { "Restore" } else { "Maximise" },
-                "Close to tray",
+                if close_to_tray {
+                    "Close to tray"
+                } else {
+                    "Close"
+                },
             ];
             for (i, label) in labels.into_iter().enumerate() {
                 let r = Rect::from_min_size(
@@ -233,7 +237,7 @@ mod tests {
                 .unwrap()
                 .maximized = Some(maximized);
             ctx.run(input, |ctx| {
-                show(ctx, TextureId::default());
+                show(ctx, TextureId::default(), true);
             })
         };
         for (column, maximized, expected) in [
