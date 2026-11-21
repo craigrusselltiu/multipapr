@@ -7,7 +7,7 @@
 
 <p align="center">
   <b>One wallpaper. Every monitor. Lined up like a single window onto your desk.</b><br>
-  Live MP4 and still-image wallpapers for Windows, mapped in real millimetres across mixed monitors.
+  Live MP4 and still-image wallpapers for Windows.
 </p>
 
 <p align="center">
@@ -18,12 +18,12 @@
 
 ---
 
-Windows spans a wallpaper by **pixels**. Put a 27" 1440p screen beside a 24" 1080p screen and the image changes size at the seam, skips over the bezels and drifts out of line. Multipapr maps it by **physical size** instead, so a line that leaves one monitor comes out of the next one at the right height and scale.
+Windows spans wallpapers by **pixels**, which breaks scale and alignment across mixed monitors and bezels. Multipapr maps by **physical size** instead, so the image continues cleanly from one screen to the next.
 
 <table>
   <tr>
     <th>Multipapr</th>
-    <th>Displays</th>
+    <th>Live Displays</th>
   </tr>
   <tr>
     <td><img src="assets/readme/demo-app.gif" alt="Resizing the wallpaper and moving display 2 in the Multipapr editor"></td>
@@ -31,13 +31,9 @@ Windows spans a wallpaper by **pixels**. Put a 27" 1440p screen beside a 24" 108
   </tr>
 </table>
 
-<sub>Left: a recording of the editor. Right: the same frames played on a 27" 1440p landscape monitor and a 24" 1080p portrait monitor.</sub>
-
 ## Install
 
-**Download:** grab [`multipapr.exe`](https://github.com/craigrusselltiu/multipapr/releases/latest/download/multipapr.exe) and run it. There's nothing else to install.
-
-**Or run one command** in PowerShell to install it with a Start menu entry:
+Download [`multipapr.exe`](https://github.com/craigrusselltiu/multipapr/releases/latest/download/multipapr.exe) and run it, or run one command in PowerShell to install it with a Start menu entry:
 
 ```powershell
 irm https://raw.githubusercontent.com/craigrusselltiu/multipapr/main/install.ps1 | iex
@@ -74,7 +70,7 @@ irm https://raw.githubusercontent.com/craigrusselltiu/multipapr/main/install.ps1
 >
 > A single mpv instance decodes the video once, on the GPU where possible, and one shader maps it to every display. Audio, interpolation and network caching are off. Playback **pauses** when the desktop is locked or a fullscreen window covers it, and it recovers after Explorer restarts or displays change. A still image renders once and then stays idle.
 
-## Command line
+## CLI
 
 ```powershell
 multipapr.exe --apply "D:\Wallpapers\loop.mp4"   # fit a file to your displays and start it
