@@ -39,7 +39,7 @@ Download [`multipapr.exe`](https://github.com/craigrusselltiu/multipapr/releases
 irm https://raw.githubusercontent.com/craigrusselltiu/multipapr/main/install.ps1 | iex
 ```
 
-## Summary
+## Goal
 
 <p align="center">
   <picture>
@@ -48,15 +48,11 @@ irm https://raw.githubusercontent.com/craigrusselltiu/multipapr/main/install.ps1
   </picture>
 </p>
 
-1. **Pick a wallpaper.** Drop or browse for a video (MP4, MOV, MKV, WebM) or image (PNG, JPEG, WebP, BMP).
-2. **Frame it.** Drag to move, pull the corner to resize or an edge to stretch, or use **Fill**, **Fit** and **Upscaling** in the sidebar.
-3. **Align your displays.** Drag each screen to match your desk and resize it from its corner or edges, or enter exact millimetre sizes and gaps (including bezels) under **Advanced**. Overlaps are hatched. Changes apply live.
-4. **Close the window.** Multipapr keeps playing from the tray by default and starts at sign-in.
+The problem Multipapr tries to solve is the visible jump where a wallpaper crosses from one monitor to the next. A circle split across two screens should still look like one circle.
+
+## Features
 
 <table>
-  <tr><td><b>Canvas</b></td><td>Drag empty space or middle-drag to pan. Scroll to zoom. <b>Reset scale</b> in the corner reframes.</td></tr>
-  <tr><td><b>Undo</b></td><td><kbd>Ctrl</kbd>+<kbd>Z</kbd> to undo, <kbd>Ctrl</kbd>+<kbd>Y</kbd> or <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Z</kbd> to redo, or use the arrows in the title bar.</td></tr>
-  <tr><td><b>Select</b></td><td>Click a display or wallpaper to select it. The purple outline and resize handles show what you’re editing. Click the same spot again to cycle through overlapping items, or click empty canvas to clear the selection.</td></tr>
   <tr><td><b>Multi-mode</b></td><td>Give each display its own wallpaper. Select a display to see its full wallpaper and adjust its framing. Click empty canvas to preview every wallpaper cropped to its display. Open <b>Advanced</b> below Wallpaper for exact display sizes and offsets.</td></tr>
   <tr><td><b>Profiles</b></td><td>The bookmark in the title bar lists your wallpaper setups. Connecting or disconnecting a monitor keeps the same crop on the remaining screens. If the active profile has a saved framing for that exact monitor combination, Multipapr restores it. Edits save automatically.</td></tr>
   <tr><td><b>Lock axis</b></td><td>Hold <kbd>Ctrl</kbd> for horizontal, <kbd>Ctrl</kbd>+<kbd>Shift</kbd> for vertical.</td></tr>
@@ -69,13 +65,9 @@ irm https://raw.githubusercontent.com/craigrusselltiu/multipapr/main/install.ps1
 > [!NOTE]
 > Playback uses [mpv](https://mpv.io/), which is built into the exe and unpacked once on first use.
 
-Multipapr decodes a shared video once, using the GPU when possible. Videos play without audio. Still images render once and then idle.
+Multipapr decodes a shared video once, using the GPU when possible. Still images render once and then idle.
 
-**Multi-mode** uses one player per display. Switching modes keeps the current wallpaper visible until the new layout fades in. **Advanced** shows the selected display’s file and playback status.
-
-In **Settings → Playback**, **Fullscreen game detected** covers fullscreen foreground apps, including borderless games. **Battery saver** follows Windows Energy Saver. Both settings can keep playing (on visible displays for fullscreen apps), pause all wallpapers, or stop to free memory.
-
-Multipapr pauses playback when Windows locks and resumes automatically when conditions clear. It restores wallpapers after Explorer restarts or displays change.
+**Multi-mode** uses one player per display. In **Settings → Playback**, **Fullscreen game detected** covers fullscreen foreground apps, including borderless games. **Battery saver** follows Windows Energy Saver. Both settings can keep playing (on visible displays for fullscreen apps), pause all wallpapers, or stop to free memory. Multipapr pauses playback when Windows locks and resumes automatically when conditions clear.
 
 ## CLI
 
