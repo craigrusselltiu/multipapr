@@ -64,14 +64,18 @@ irm https://raw.githubusercontent.com/craigrusselltiu/multipapr/main/install.ps1
   <tr><td><b>Settings</b></td><td>Toggle <b>Start at sign-in</b>, <b>Close to system tray</b> or update Multipapr from the cog icon.</td></tr>
 </table>
 
-## Lightweight
+## Playback
 
 > [!NOTE]
 > Playback uses [mpv](https://mpv.io/), which is built into the exe and unpacked once on first use.
->
-> A single mpv instance decodes the video once, on the GPU where possible, and one shader maps it to every display. Multi-mode runs one instance per display. Audio, interpolation and network caching are off. Playback pauses when Windows locks. In **Settings → Playback**, **Fullscreen game detected** can keep visible displays playing, pause every wallpaper, or stop the players to free memory. This applies to fullscreen foreground apps, including borderless games. **Battery saver** can keep playing, pause, or stop when Windows turns on Energy Saver. Playback resumes when the condition clears. Multipapr also restores its wallpaper surfaces after Explorer restarts or displays change. A still image renders once and then stays idle.
->
-> Switching Multi-mode keeps the current wallpaper visible while the replacement players load, then fades to the new layout. A loading circle beside the switch stays visible until the transition finishes. Open **Advanced** for the selected display’s assigned file and playback status.
+
+Multipapr decodes a shared video once, using the GPU when possible. Videos play without audio. Still images render once and then idle.
+
+**Multi-mode** uses one player per display. Switching modes keeps the current wallpaper visible until the new layout fades in. **Advanced** shows the selected display’s file and playback status.
+
+In **Settings → Playback**, **Fullscreen game detected** covers fullscreen foreground apps, including borderless games. **Battery saver** follows Windows Energy Saver. Both settings can keep playing (on visible displays for fullscreen apps), pause all wallpapers, or stop to free memory.
+
+Multipapr pauses playback when Windows locks and resumes automatically when conditions clear. It restores wallpapers after Explorer restarts or displays change.
 
 ## CLI
 
