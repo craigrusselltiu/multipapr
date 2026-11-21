@@ -1,14 +1,17 @@
+mod playback;
 use crate::{
     desktop::{self, Handle, Surface, wide},
     displays,
     layout::{Display, Layout, Rect, Settings, display_set, follow_displays},
     shader::{self, Part},
-    storage,
+    storage::{self, PlaybackAction, Preferences},
     tray::{self, Tray},
     update,
 };
 use anyhow::{Context, Result, ensure};
+use playback::{PlaybackPolicy, Players};
 use std::{
+    collections::BTreeMap,
     fs,
     hash::{DefaultHasher, Hash, Hasher},
     io::{self, Write},
@@ -29,7 +32,7 @@ const STOP: &str = r"Local\Multipapr.Stop.v1";
 const OPEN: &str = r"Local\Multipapr.OpenEditor.v1";
 const RELAUNCH: &str = r"Local\Multipapr.Relaunch.v1";
 
-fn running() -> bool {
+pub fn running() -> bool {
     unsafe {
         let h = OpenMutexW(SYNCHRONIZATION_SYNCHRONIZE, 0, wide(INSTANCE).as_ptr());
         if h.is_null() {
@@ -205,8 +208,9 @@ fn editor_window(pid: u32) -> HWND {
     search.hwnd
 }
 
-pub fn player_pipe(host_id: u32, part: &Part, displays: &[Display]) -> PathBuf {
+pub fn player_pipe(host_id: u32, multi: bool, part: &Part, displays: &[Display]) -> PathBuf {
     let mut hash = DefaultHasher::new();
+    multi.hash(&mut hash);
     part.media.hash(&mut hash);
     for &i in &part.displays {
         let d = &displays[i];
@@ -234,18 +238,46 @@ fn set_player_property(pipe: &Path, name: &str, value: impl serde::Serialize) ->
     Ok(())
 }
 
+#[derive(serde::Serialize, serde::Deserialize, PartialEq)]
+pub struct PlaybackReport {
+    pub host: u32,
+    pub layout_modified: Option<SystemTime>,
+    #[serde(default)]
+    pub loading: bool,
+    pub displays: BTreeMap<String, (PathBuf, String)>,
+}
+impl PlaybackReport {
+    pub fn switch_finished(&self, requested: SystemTime) -> bool {
+        !self.loading
+            && self
+                .layout_modified
+                .is_none_or(|modified| modified >= requested)
+    }
+
+    fn record(&mut self, part: &Part, displays: &[Display], state: &str) {
+        for &i in &part.displays {
+            self.displays.insert(
+                displays[i].id.clone(),
+                (part.media.clone(), state.to_owned()),
+            );
+        }
+    }
+}
+
 struct Player {
     part: Part,
-    log: String,
+    started: Instant,
+    still: Option<bool>,
     process: ManagedChild,
     surface: Surface,
     pipe: PathBuf,
     desktop: Rect,
     covered: bool,
     pending_mapping: Option<String>,
+    work: tempfile::TempDir,
 }
 impl Player {
-    fn open(n: usize, part: &Part, settings: &Settings, displays: &[Display]) -> Result<Self> {
+    fn open(part: &Part, settings: &Settings, displays: &[Display]) -> Result<Self> {
         ensure!(
             part.media.is_file(),
             "Cannot find wallpaper {}",
@@ -253,16 +285,19 @@ impl Player {
         );
         let layout = Layout::new(displays, &settings.calibration);
         let dir = storage::home()?;
-        let shader_path = dir.join(format!("layout-{n}.glsl"));
+        let work = tempfile::Builder::new()
+            .prefix("player-")
+            .tempdir_in(&dir)?;
+        let shader_path = work.path().join("layout.glsl");
         fs::write(&shader_path, shader::generate(displays, part))?;
         let profile = dir.join("playback.conf");
         let desktop = part.desktop(displays);
         let surface = Surface::create(desktop)?;
-        let pipe = player_pipe(std::process::id(), part, displays);
-        let log_name = format!("player-{n}.log");
-        let log = fs::File::create(dir.join(&log_name))?;
+        let pipe = player_pipe(std::process::id(), settings.multi, part, displays);
+        let log = fs::File::create(work.path().join("mpv.log"))?;
         let mut command = storage::command(storage::ensure_mpv()?);
         command
+            .current_dir(work.path())
             .args([
                 "--no-config",
                 "--player-operation-mode=cplayer",
@@ -288,6 +323,10 @@ impl Player {
                 "--d3d11-flip=no",
             ])
             .arg(format!("--wid={}", surface.hwnd as usize))
+            .arg(format!(
+                "--script={}",
+                dir.join("first-frame.lua").display()
+            ))
             .arg(format!("--include={}", profile.display()))
             .arg(format!("--glsl-shader={}", shader_path.display()))
             .arg(format!(
@@ -300,11 +339,13 @@ impl Player {
             .stderr(log)
             .arg("--msg-level=all=warn")
             .arg("--")
-            .arg(&part.media);
+            .arg(std::path::absolute(&part.media)?);
         let process = ManagedChild::spawn(&mut command).context("Cannot launch mpv")?;
         Ok(Self {
             part: part.clone(),
-            log: log_name,
+            work,
+            started: Instant::now(),
+            still: None,
             process,
             surface,
             pipe,
@@ -313,17 +354,35 @@ impl Player {
             pending_mapping: None,
         })
     }
-    fn update(&mut self) -> Result<()> {
-        self.surface.maintain(self.desktop)?;
+    fn check(&mut self) -> Result<()> {
         if let Some(status) = self.process.child.try_wait()? {
-            anyhow::bail!("Wallpaper player exited ({status}). See {}", self.log);
+            let log = self.work.path().join("mpv.log");
+            let name = format!("player-{}.log", self.part.displays[0]);
+            fs::copy(log, storage::home()?.join(&name))?;
+            anyhow::bail!("Player exited ({status}). See {name}");
         }
+        if self.still.is_none() {
+            if let Ok(frame) = fs::read(self.work.path().join("first-frame")) {
+                self.still = match frame.as_slice() {
+                    b"still" => Some(true),
+                    b"video" => Some(false),
+                    _ => None,
+                };
+            }
+            ensure!(
+                self.still.is_some() || self.started.elapsed() < Duration::from_secs(30),
+                "Timed out waiting for a rendered frame"
+            );
+        }
+        Ok(())
+    }
+    fn update(&mut self, covered: bool) -> Result<()> {
+        self.surface.maintain(self.desktop)?;
         if let Some(parameters) = &self.pending_mapping
             && update_mapping(&self.pipe, parameters).is_ok()
         {
             self.pending_mapping = None;
         }
-        let covered = desktop::locked_or_covered(self.desktop);
         if covered != self.covered
             && set_player_property(&self.pipe, "user-data/multipapr/covered", covered).is_ok()
         {
@@ -364,10 +423,19 @@ pub fn run(mut show_editor: bool) -> Result<()> {
             dir.join("playback.conf"),
             include_bytes!("../assets/playback.conf"),
         )?;
+        fs::write(
+            dir.join("first-frame.lua"),
+            include_bytes!("../assets/first-frame.lua"),
+        )?;
         let config = dir.join("layout.json");
         let mut stamp = None;
         let mut topology = Vec::new();
-        let mut players: Vec<Option<Player>> = Vec::new();
+        let mut players = Players::default();
+        let mut current = None;
+        let mut last_report = None;
+        let preferences_path = dir.join("preferences.json");
+        let mut preferences = storage::load_preferences();
+        let mut pref_stamp = version(&preferences_path);
         let mut next = Instant::now();
         let mut recheck = Instant::now();
         let mut displays = Vec::new();
@@ -393,7 +461,9 @@ pub fn run(mut show_editor: bool) -> Result<()> {
                 let result = (|| -> Result<()> {
                     let mut new_stamp = version(&config);
                     if new_stamp.is_none() {
-                        players.clear();
+                        players = Players::default();
+                        let _ = fs::remove_file(dir.join("playback.json"));
+                        last_report = None;
                         stamp = None;
                         return Ok(());
                     }
@@ -411,12 +481,7 @@ pub fn run(mut show_editor: bool) -> Result<()> {
                             let layout = Layout::new(&displays, &next.calibration);
                             if let Ok(mut profiles) = storage::load_profiles() {
                                 let before = profiles.clone();
-                                follow_displays(
-                                    &mut profiles,
-                                    &mut next,
-                                    &layout,
-                                    &display_set(&displays),
-                                );
+                                follow_displays(&mut profiles, &mut next, &display_set(&displays));
                                 if profiles != before
                                     && let Err(e) = storage::save_profiles(&profiles)
                                 {
@@ -437,44 +502,27 @@ pub fn run(mut show_editor: bool) -> Result<()> {
                             }
                             settings = next;
                         }
-                        let plan = shader::plan(&settings, &displays);
-                        if topology != displays {
-                            players.clear();
-                        }
-                        players.resize_with(displays.len(), || None);
-                        for (i, slot) in players.iter_mut().enumerate() {
-                            if slot.as_ref().is_some_and(|p| {
-                                !plan
-                                    .iter()
-                                    .any(|part| part.displays[0] == i && *part == p.part)
-                            }) {
-                                *slot = None;
-                            }
-                        }
-                        let layout = Layout::new(&displays, &settings.calibration);
-                        for part in &plan {
-                            let n = part.displays[0];
-                            let slot = &mut players[n];
-                            if let Some(p) = slot {
-                                p.pending_mapping =
-                                    Some(shader::parameters(&layout, &settings, &displays, part));
-                            } else {
-                                match Player::open(n, part, &settings, &displays) {
-                                    Ok(p) => *slot = Some(p),
-                                    Err(e) => error = Some(e),
-                                }
-                            }
-                        }
+                        current = Some(settings);
                         stamp = new_stamp;
                         topology.clone_from(&displays);
                     }
-                    for slot in &mut players {
-                        if let Some(p) = slot
-                            && let Err(e) = p.update()
-                        {
-                            *slot = None;
-                            error = Some(e);
-                        }
+                    let observed = version(&preferences_path);
+                    if observed != pref_stamp {
+                        preferences = storage::load_preferences();
+                        pref_stamp = observed;
+                    }
+                    let policy = PlaybackPolicy::detect(&displays, &preferences);
+                    let mut report = players.reconcile(
+                        current.as_ref().context("Waiting for layout")?,
+                        &displays,
+                        &policy,
+                        changed || follow,
+                    )?;
+                    report.layout_modified = stamp;
+                    report.loading = players.is_loading();
+                    if last_report.as_ref() != Some(&report) {
+                        storage::save("playback.json", &report)?;
+                        last_report = Some(report);
                     }
                     error.map_or(Ok(()), Err)
                 })();
@@ -497,11 +545,23 @@ pub fn run(mut show_editor: bool) -> Result<()> {
                     }
                 }
             }
+            let was_loading = players.is_loading();
+            if let Err(e) = players.advance() {
+                players.discard_replacements();
+                let msg = format!("{e:#}");
+                if msg != last_error {
+                    let _ = fs::write(dir.join("host-error.txt"), &msg);
+                    last_error = msg;
+                }
+                next = Instant::now() + Duration::from_secs(1);
+            } else if was_loading && !players.is_loading() {
+                next = Instant::now();
+            }
             let event = desktop::dispatch(
                 &[relaunch.0, stop.0, open.0],
                 next.saturating_duration_since(Instant::now())
                     .as_millis()
-                    .min(1000) as u32,
+                    .min(players.interval()) as u32,
             );
             if event == WAIT_OBJECT_0 {
                 break true;

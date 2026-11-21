@@ -21,7 +21,7 @@ use std::{
 use tempfile::NamedTempFile;
 use windows_sys::Win32::UI::WindowsAndMessaging::AllowSetForegroundWindow;
 
-const MODAL_WIDTH: f32 = 500.;
+const MODAL_WIDTH: f32 = 560.;
 const CARD_BORDER: Color32 = Color32::from_rgb(47, 47, 54);
 const SUBTEXT: Color32 = Color32::from_rgb(154, 153, 165);
 
@@ -228,9 +228,8 @@ pub(super) fn toggle_switch(ui: &mut Ui, on: &mut bool, label: &str) -> Response
         *on = !*on;
         response.mark_changed();
     }
-    response.widget_info(|| {
-        WidgetInfo::selected(WidgetType::Checkbox, ui.is_enabled(), *on, label)
-    });
+    response
+        .widget_info(|| WidgetInfo::selected(WidgetType::Checkbox, ui.is_enabled(), *on, label));
     if ui.is_rect_visible(rect) {
         let how_on = ui.ctx().animate_bool_responsive(response.id, *on);
         let radius = 0.5 * rect.height();
@@ -264,8 +263,11 @@ pub(super) fn toggle_switch(ui: &mut Ui, on: &mut bool, label: &str) -> Response
 
 fn hairline(ui: &mut Ui) {
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 1.), Sense::hover());
-    ui.painter()
-        .hline(rect.x_range(), rect.center().y, Stroke::new(1.0_f32, CARD_BORDER));
+    ui.painter().hline(
+        rect.x_range(),
+        rect.center().y,
+        Stroke::new(1.0_f32, CARD_BORDER),
+    );
 }
 
 fn section_heading(ui: &mut Ui, title: &str) {
@@ -346,6 +348,37 @@ fn setting_row<R>(
         .inner
 }
 
+fn playback_setting(
+    ui: &mut Ui,
+    title: &str,
+    description: &str,
+    value: &mut storage::PlaybackAction,
+    default: &str,
+) {
+    use storage::PlaybackAction::*;
+    let options = [
+        (Continue, default),
+        (Pause, "Pause all"),
+        (Stop, "Stop and free memory"),
+    ];
+    let selected = options
+        .iter()
+        .find(|(action, _)| action == value)
+        .unwrap()
+        .1;
+    let width = 200.;
+    setting_row(ui, title, description, vec2(width, 36.), |ui| {
+        ComboBox::from_id_salt(title)
+            .width(width)
+            .selected_text(selected)
+            .show_ui(ui, |ui| {
+                for (action, label) in options {
+                    ui.selectable_value(value, action, label);
+                }
+            });
+    });
+}
+
 fn render_update_card(ui: &mut Ui, update: &UpdateState) -> UpdateAction {
     let title = format!("Multipapr {}", update::current_version_label());
     let description = match &update.phase {
@@ -383,63 +416,65 @@ fn render_update_card(ui: &mut Ui, update: &UpdateState) -> UpdateAction {
     let mut action = UpdateAction::None;
     settings_card(ui, |ui| {
         let button_size = vec2(98., 32.);
-        setting_row(ui, &title, &description, button_size, |ui| match &update.phase {
-            UpdatePhase::Idle | UpdatePhase::Checking(_) => {
-                ui.add_enabled(
-                    false,
-                    Button::new(RichText::new("Checking…").color(SUBTEXT))
-                        .fill(INK)
-                        .stroke(Stroke::new(1.0_f32, CARD_BORDER))
-                        .corner_radius(7)
-                        .min_size(button_size),
-                );
-            }
-            UpdatePhase::Latest => {
-                ui.add_enabled(
-                    false,
-                    Button::new(RichText::new("Latest").color(SUBTEXT))
-                        .fill(INK)
-                        .stroke(Stroke::new(1.0_f32, CARD_BORDER))
-                        .corner_radius(7)
-                        .min_size(button_size),
-                );
-            }
-            UpdatePhase::Available(release) => {
-                let button = Button::new(RichText::new("Update").color(Color32::WHITE))
-                    .selected(true)
-                    .corner_radius(7)
-                    .min_size(button_size);
-                if ui
-                    .add(button)
-                    .on_hover_cursor(CursorIcon::PointingHand)
-                    .on_hover_text(format!("Update to {}", release.version.display()))
-                    .clicked()
-                {
-                    action = UpdateAction::Install(release.clone());
+        setting_row(ui, &title, &description, button_size, |ui| {
+            match &update.phase {
+                UpdatePhase::Idle | UpdatePhase::Checking(_) => {
+                    ui.add_enabled(
+                        false,
+                        Button::new(RichText::new("Checking…").color(SUBTEXT))
+                            .fill(INK)
+                            .stroke(Stroke::new(1.0_f32, CARD_BORDER))
+                            .corner_radius(7)
+                            .min_size(button_size),
+                    );
                 }
-            }
-            UpdatePhase::Updating { .. } => {
-                ui.add_enabled(
-                    false,
-                    Button::new(RichText::new("Updating…").color(SUBTEXT))
-                        .fill(INK)
-                        .stroke(Stroke::new(1.0_f32, CARD_BORDER))
+                UpdatePhase::Latest => {
+                    ui.add_enabled(
+                        false,
+                        Button::new(RichText::new("Latest").color(SUBTEXT))
+                            .fill(INK)
+                            .stroke(Stroke::new(1.0_f32, CARD_BORDER))
+                            .corner_radius(7)
+                            .min_size(button_size),
+                    );
+                }
+                UpdatePhase::Available(release) => {
+                    let button = Button::new(RichText::new("Update").color(Color32::WHITE))
+                        .selected(true)
                         .corner_radius(7)
-                        .min_size(button_size),
-                );
-            }
-            UpdatePhase::CheckFailed(_) => {
-                let button = Button::new("Retry")
-                    .fill(FIELD)
-                    .stroke(Stroke::new(1.0_f32, LINE))
-                    .corner_radius(7)
-                    .min_size(button_size);
-                if ui
-                    .add(button)
-                    .on_hover_cursor(CursorIcon::PointingHand)
-                    .clicked()
-                {
-                    action = UpdateAction::Recheck;
+                        .min_size(button_size);
+                    if ui
+                        .add(button)
+                        .on_hover_cursor(CursorIcon::PointingHand)
+                        .on_hover_text(format!("Update to {}", release.version.display()))
+                        .clicked()
+                    {
+                        action = UpdateAction::Install(release.clone());
+                    }
+                }
+                UpdatePhase::Updating { .. } => {
+                    ui.add_enabled(
+                        false,
+                        Button::new(RichText::new("Updating…").color(SUBTEXT))
+                            .fill(INK)
+                            .stroke(Stroke::new(1.0_f32, CARD_BORDER))
+                            .corner_radius(7)
+                            .min_size(button_size),
+                    );
+                }
+                UpdatePhase::CheckFailed(_) => {
+                    let button = Button::new("Retry")
+                        .fill(FIELD)
+                        .stroke(Stroke::new(1.0_f32, LINE))
+                        .corner_radius(7)
+                        .min_size(button_size);
+                    if ui
+                        .add(button)
+                        .on_hover_cursor(CursorIcon::PointingHand)
+                        .clicked()
+                    {
+                        action = UpdateAction::Recheck;
+                    }
                 }
             }
         });
@@ -456,11 +491,13 @@ fn render_update_card(ui: &mut Ui, update: &UpdateState) -> UpdateAction {
                         bottom: 14,
                     })
                     .show(ui, |ui| {
-                        let (bar, _) = ui
-                            .allocate_exact_size(vec2(ui.available_width(), 3.), Sense::hover());
+                        let (bar, _) =
+                            ui.allocate_exact_size(vec2(ui.available_width(), 3.), Sense::hover());
                         ui.painter().rect_filled(bar, 1.5, FIELD);
-                        let filled =
-                            Rect::from_min_size(bar.min, vec2(bar.width() * fraction, bar.height()));
+                        let filled = Rect::from_min_size(
+                            bar.min,
+                            vec2(bar.width() * fraction, bar.height()),
+                        );
                         ui.painter().rect_filled(filled, 1.5, ACCENT);
                     });
             }
@@ -481,6 +518,151 @@ fn apply_update_and_relaunch(exe: &Path, staged: NamedTempFile) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn settings_dialog<R>(
+    ctx: &Context,
+    contents: impl FnOnce(&mut Ui) -> R,
+) -> ModalResponse<(bool, scroll_area::ScrollAreaOutput<R>)> {
+    let bounds = ctx.screen_rect().shrink(16.);
+    let width = MODAL_WIDTH.min(bounds.width() - 2.);
+    let id = Id::new("settings dialog");
+    Modal::new(id)
+        .area(Modal::default_area(id).default_size(vec2(width + 2., bounds.height())))
+        .backdrop_color(Color32::from_black_alpha(96))
+        .frame(
+            Frame::new()
+                .fill(INK)
+                .inner_margin(0)
+                .corner_radius(14)
+                .stroke(Stroke::new(1.0_f32, LINE)),
+        )
+        .show(ctx, |ui| {
+            ui.set_width(width);
+            ui.set_max_height(bounds.height() - 2.);
+            ui.spacing_mut().item_spacing.y = 0.;
+            let close = Frame::new()
+                .inner_margin(Margin {
+                    left: 22,
+                    right: 14,
+                    top: 10,
+                    bottom: 10,
+                })
+                .show(ui, |ui| {
+                    let header_width = width - 36.;
+                    ui.set_min_width(header_width);
+                    ui.set_max_width(header_width);
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            RichText::new("Settings")
+                                .font(heading_font(15.5))
+                                .color(Color32::from_gray(244)),
+                        );
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            Icon::Close.button(ui, "Close settings", false).clicked()
+                        })
+                        .inner
+                    })
+                    .inner
+                })
+                .inner;
+            hairline(ui);
+            let scroll = Frame::new()
+                .inner_margin(Margin::symmetric(12, 12))
+                .show(ui, |ui| {
+                    ui.visuals_mut().clip_rect_margin = 0.;
+                    ui.spacing_mut().scroll = style::ScrollStyle::solid();
+                    ScrollArea::vertical()
+                        .id_salt("settings body")
+                        .scroll_bar_visibility(scroll_area::ScrollBarVisibility::VisibleWhenNeeded)
+                        .auto_shrink([false, true])
+                        .show(ui, |ui| {
+                            Frame::new()
+                                .inner_margin(Margin::symmetric(10, 6))
+                                .show(ui, contents)
+                                .inner
+                        })
+                })
+                .inner;
+            (close, scroll)
+        })
+}
+
+impl SettingsPopup {
+    fn contents(
+        &mut self,
+        ui: &mut Ui,
+        login: &mut bool,
+        preferences: &mut storage::Preferences,
+        update: &UpdateState,
+    ) -> UpdateAction {
+        section_heading(ui, "General");
+        settings_card(ui, |ui| {
+            let toggle_size = vec2(38., 22.);
+            if setting_row(
+                ui,
+                "Start at sign-in",
+                "Launch Multipapr in the background when you sign in to Windows.",
+                toggle_size,
+                |ui| toggle_switch(ui, login, "Start at sign-in"),
+            )
+            .changed()
+            {
+                self.error = storage::startup(*login).err().map(|e| {
+                    *login = !*login;
+                    e.to_string()
+                });
+            }
+            hairline(ui);
+            if setting_row(
+                ui,
+                "Close to system tray",
+                "Keep the wallpaper running in the tray when you close this window.",
+                toggle_size,
+                |ui| toggle_switch(ui, &mut preferences.close_to_tray, "Close to system tray"),
+            )
+            .changed()
+            {
+                self.error = storage::save_preferences(preferences).err().map(|e| {
+                    preferences.close_to_tray = !preferences.close_to_tray;
+                    e.to_string()
+                });
+            }
+        });
+        ui.add_space(18.);
+        section_heading(ui, "Playback");
+        let previous = preferences.clone();
+        settings_card(ui, |ui| {
+            playback_setting(
+                ui,
+                "Fullscreen game detected",
+                "When a foreground app fills a display.",
+                &mut preferences.fullscreen,
+                "Play visible displays",
+            );
+            hairline(ui);
+            playback_setting(
+                ui,
+                "Battery saver",
+                "When Windows Energy Saver is on.",
+                &mut preferences.battery_saver,
+                "Keep playing",
+            );
+        });
+        if *preferences != previous
+            && let Err(error) = storage::save_preferences(preferences)
+        {
+            *preferences = previous;
+            self.error = Some(error.to_string());
+        }
+        if let Some(error) = &self.error {
+            ui.add_space(8.);
+            ui.add(Label::new(RichText::new(error).small().color(MUTED)).wrap());
+        }
+        ui.add_space(18.);
+        section_heading(ui, "About");
+        render_update_card(ui, update)
+    }
 }
 
 impl Editor {
@@ -548,109 +730,14 @@ impl Editor {
             rect: ctx.screen_rect(),
             callback: Arc::new(CallbackFn::new(blur_editor)),
         });
-        let mut update_action = UpdateAction::None;
-        let response = Modal::new(Id::new("settings dialog"))
-            .backdrop_color(Color32::from_black_alpha(96))
-            .frame(
-                Frame::new()
-                    .fill(INK)
-                    .inner_margin(0)
-                    .corner_radius(14)
-                    .stroke(Stroke::new(1.0_f32, LINE)),
-            )
-            .show(ctx, |ui| {
-                ui.set_min_width(MODAL_WIDTH);
-                ui.set_max_width(MODAL_WIDTH);
-                ui.spacing_mut().item_spacing.y = 0.;
-                let close = Frame::new()
-                    .inner_margin(Margin {
-                        left: 22,
-                        right: 14,
-                        top: 10,
-                        bottom: 10,
-                    })
-                    .show(ui, |ui| {
-                        let header_width = MODAL_WIDTH - 36.;
-                        ui.set_min_width(header_width);
-                        ui.set_max_width(header_width);
-                        ui.horizontal(|ui| {
-                            ui.label(
-                                RichText::new("Settings")
-                                    .font(heading_font(15.5))
-                                    .color(Color32::from_gray(244)),
-                            );
-                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                Icon::Close.button(ui, "Close settings", false).clicked()
-                            })
-                            .inner
-                        })
-                        .inner
-                    })
-                    .inner;
-                hairline(ui);
-                Frame::new()
-                    .inner_margin(Margin::symmetric(22, 18))
-                    .show(ui, |ui| {
-                        let body_width = MODAL_WIDTH - 44.;
-                        ui.set_min_width(body_width);
-                        ui.set_max_width(body_width);
-                        ui.spacing_mut().item_spacing.y = 0.;
-                        section_heading(ui, "General");
-                        settings_card(ui, |ui| {
-                            let toggle_size = vec2(38., 22.);
-                            if setting_row(
-                                ui,
-                                "Start at sign-in",
-                                "Launch Multipapr in the background when you sign in to Windows.",
-                                toggle_size,
-                                |ui| toggle_switch(ui, &mut self.login, "Start at sign-in"),
-                            )
-                            .changed()
-                            {
-                                popup.error = storage::startup(self.login).err().map(|e| {
-                                    self.login = !self.login;
-                                    e.to_string()
-                                });
-                            }
-                            hairline(ui);
-                            if setting_row(
-                                ui,
-                                "Close to system tray",
-                                "Keep the wallpaper running in the tray when you close this window.",
-                                toggle_size,
-                                |ui| {
-                                    toggle_switch(
-                                        ui,
-                                        &mut self.preferences.close_to_tray,
-                                        "Close to system tray",
-                                    )
-                                },
-                            )
-                            .changed()
-                            {
-                                popup.error = storage::save_preferences(&self.preferences)
-                                    .err()
-                                    .map(|e| {
-                                        self.preferences.close_to_tray =
-                                            !self.preferences.close_to_tray;
-                                        e.to_string()
-                                    });
-                                self.exit
-                                    .close_to_tray
-                                    .store(self.preferences.close_to_tray, Ordering::Relaxed);
-                            }
-                        });
-                        if let Some(error) = &popup.error {
-                            ui.add_space(8.);
-                            ui.add(Label::new(RichText::new(error).small().color(MUTED)).wrap());
-                        }
-                        ui.add_space(18.);
-                        section_heading(ui, "About");
-                        update_action = render_update_card(ui, &self.update);
-                    });
-                close
-            });
-        match update_action {
+        let response = settings_dialog(ctx, |ui| {
+            popup.contents(ui, &mut self.login, &mut self.preferences, &self.update)
+        });
+        self.exit
+            .close_to_tray
+            .store(self.preferences.close_to_tray, Ordering::Relaxed);
+        let close = response.inner.0 || response.should_close();
+        match response.inner.1.inner {
             UpdateAction::None => {}
             UpdateAction::Recheck => self.update.start_check(ctx),
             UpdateAction::Install(release) => {
@@ -660,7 +747,7 @@ impl Editor {
                 self.update.start_update(release, &self.exe, ctx);
             }
         }
-        if response.inner || response.should_close() {
+        if close {
             self.popup = None;
             ctx.request_repaint();
         }
@@ -687,6 +774,98 @@ mod tests {
                 });
             },
         )
+    }
+
+    #[test]
+    fn settings_fit_at_normal_size_and_scroll_only_while_space_is_limited() {
+        let ctx = Context::default();
+        super::super::set_fonts(&ctx);
+        ctx.style_mut(|s| {
+            s.spacing.item_spacing = vec2(8., 10.);
+            s.spacing.interact_size.y = 36.;
+            s.spacing.button_padding = vec2(14., 8.);
+        });
+        let mut popup = SettingsPopup::default();
+        let mut prefs = storage::Preferences::default();
+        let mut login = false;
+        let update = UpdateState {
+            phase: UpdatePhase::Latest,
+            error: None,
+        };
+        let mut frame = |size: Vec2| {
+            let mut result = None;
+            let output = ctx.run(
+                RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, size)),
+                    ..Default::default()
+                },
+                |ctx| {
+                    let modal = settings_dialog(ctx, |ui| {
+                        popup.contents(ui, &mut login, &mut prefs, &update)
+                    });
+                    result = Some((modal.response.rect, modal.inner.1));
+                },
+            );
+            let (dialog, body) = result.unwrap();
+            (dialog, body, output.shapes)
+        };
+        for (size, overflow) in [
+            (vec2(1080., 680.), false),
+            (vec2(760., 450.), true),
+            (vec2(1080., 680.), false),
+        ] {
+            for _ in 0..3 {
+                frame(size);
+            }
+            let (dialog, body, shapes) = frame(size);
+            assert!(
+                Rect::from_min_size(Pos2::ZERO, size)
+                    .shrink(15.)
+                    .contains_rect(dialog),
+                "{dialog:?} in {size:?}"
+            );
+            for label in [
+                "General",
+                "Fullscreen game detected",
+                "Battery saver",
+                "About",
+                "Latest",
+            ] {
+                let shape = shapes.iter().find_map(|shape| match &shape.shape {
+                    epaint::Shape::Text(text) if text.galley.text() == label => {
+                        Some((text.visual_bounding_rect(), shape.clip_rect))
+                    }
+                    _ => None,
+                });
+                if !overflow {
+                    let (rect, clip) = shape.unwrap_or_else(|| panic!("missing {label}"));
+                    assert!(
+                        clip.intersect(dialog.shrink(10.)).contains_rect(rect),
+                        "{label} at {rect:?}, clipped to {clip:?} in {dialog:?}"
+                    );
+                } else if let Some((_, clip)) = shape {
+                    assert!(
+                        clip.bottom() <= dialog.bottom() - 10.,
+                        "body escapes {dialog:?}"
+                    );
+                }
+            }
+            assert_eq!(
+                body.content_size.y > body.inner_rect.height() + 1.,
+                overflow,
+                "{:?} vs {:?}",
+                body.content_size,
+                body.inner_rect
+            );
+            if overflow {
+                let mut scrolled = body.state;
+                scrolled.offset.y = body.content_size.y;
+                scrolled.store(&ctx, body.id);
+                assert!(frame(size).1.state.offset.y > 0.);
+            } else {
+                assert_eq!(body.state.offset.y, 0.);
+            }
+        }
     }
 
     #[test]

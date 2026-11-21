@@ -204,7 +204,11 @@ mod tests {
         assert_eq!(parts[1].desktop(&displays), displays[1].px);
         let code = generate(&displays, &parts[1]);
         assert!(code.contains("//!PARAM u0") && !code.contains("//!PARAM u1"));
-        let pipe = crate::host::player_pipe(42, &parts[1], &displays);
+        let pipe = crate::host::player_pipe(42, settings.multi, &parts[1], &displays);
+        assert_ne!(
+            pipe,
+            crate::host::player_pipe(42, !settings.multi, &parts[1], &displays)
+        );
         let layout = Layout::new(&displays, &settings.calibration);
         let pitch = layout.pitch(&settings);
         settings
@@ -218,11 +222,19 @@ mod tests {
         );
         settings.screens.get_mut("b").unwrap().media.path = "other.jpg".into();
         assert_ne!(
-            crate::host::player_pipe(42, &plan(&settings, &displays)[1], &displays),
+            crate::host::player_pipe(
+                42,
+                settings.multi,
+                &plan(&settings, &displays)[1],
+                &displays
+            ),
             pipe
         );
         let mut moved = displays.clone();
         moved[1].px.x = -1920.;
-        assert_ne!(crate::host::player_pipe(42, &parts[1], &moved), pipe);
+        assert_ne!(
+            crate::host::player_pipe(42, settings.multi, &parts[1], &moved),
+            pipe
+        );
     }
 }

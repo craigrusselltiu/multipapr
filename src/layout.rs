@@ -188,6 +188,13 @@ pub struct Framing {
     pub stretch: f32,
     pub center: [f32; 2],
 }
+impl Framing {
+    fn apply(&self, wallpaper: &mut Wallpaper) {
+        wallpaper.scale = self.scale;
+        wallpaper.stretch = self.stretch;
+        wallpaper.center = self.center;
+    }
+}
 
 pub const DEFAULT_PROFILE: &str = "Default";
 
@@ -244,16 +251,9 @@ impl Profile {
         s.profile = Some(self.name.clone());
         s.multi = self.multi;
         s.screens = self.screens.clone();
-        self.apply_framing(s, layout, set);
-    }
-    fn apply_framing(&self, s: &mut Settings, layout: &Layout, set: &str) {
         s.display_set = set.into();
         match self.framings.get(set) {
-            Some(f) => {
-                s.wallpaper.scale = f.scale;
-                s.wallpaper.stretch = f.stretch;
-                s.wallpaper.center = f.center;
-            }
+            Some(f) => f.apply(&mut s.wallpaper),
             None => {
                 let pitch = layout.pitch(s);
                 s.wallpaper.cover(pitch, layout.bounds);
@@ -312,7 +312,7 @@ pub fn remember(profiles: &mut Vec<Profile>, s: &mut Settings, set: &str) {
     profiles[i].record(s, set);
 }
 
-pub fn follow_displays(profiles: &mut Vec<Profile>, s: &mut Settings, layout: &Layout, set: &str) {
+pub fn follow_displays(profiles: &mut Vec<Profile>, s: &mut Settings, set: &str) {
     if !s.display_set.is_empty() && s.display_set != set {
         let previous = s.display_set.clone();
         remember(profiles, s, &previous);
@@ -322,8 +322,9 @@ pub fn follow_displays(profiles: &mut Vec<Profile>, s: &mut Settings, layout: &L
             .iter()
             .find(|p| Some(&p.name) == s.profile.as_ref())
         && profile.media == s.wallpaper.media
+        && let Some(framing) = profile.framings.get(set)
     {
-        profile.apply_framing(s, layout, set);
+        framing.apply(&mut s.wallpaper);
     }
     remember(profiles, s, set);
 }
@@ -662,6 +663,61 @@ mod tests {
         assert_eq!(after.media(&s, &s.wallpaper), image);
     }
     #[test]
+    fn hotplug_keeps_surviving_crops_and_restores_known_framings() {
+        let a = display("a", Rect::new(0., 0., 2560., 1440.), [600., 340.]);
+        let b = display("b", Rect::new(2560., -240., 1080., 1920.), [270., 480.]);
+        let c = display("c", Rect::new(3640., 0., 1920., 1080.), [500., 280.]);
+        let trio = [a, b.clone(), c.clone()];
+        let mut s = Settings::new(Media {
+            path: "span.png".into(),
+            width: 5760,
+            height: 2160,
+        });
+        let layout = Layout::new(&trio, &s.calibration);
+        layout.move_panel(&trio, &mut s, 1, [12., -18.]);
+        let layout = Layout::new(&trio, &s.calibration);
+        let panels = [layout.panels[1], layout.panels[2]];
+        s.wallpaper.center = [650., 105.];
+        s.wallpaper.scale = 1.25;
+        s.wallpaper.stretch = 0.8;
+        let trio_image = layout.media(&s, &s.wallpaper);
+        let mut profiles = Vec::new();
+        remember(&mut profiles, &mut s, &display_set(&trio));
+
+        let mut pair = [b, c];
+        pair[0].primary = true;
+        for d in &mut pair {
+            d.px.x -= 2560.;
+            d.px.y += 240.;
+        }
+        follow_displays(&mut profiles, &mut s, &display_set(&pair));
+        let layout = Layout::new(&pair, &s.calibration);
+        assert_eq!(layout.panels, panels);
+        assert_eq!(layout.media(&s, &s.wallpaper), trio_image);
+
+        s.wallpaper.scale = 0.9;
+        s.wallpaper.center = [810., 220.];
+        let pair_image = layout.media(&s, &s.wallpaper);
+        let d = display("d", Rect::new(-1920., 0., 1920., 1080.), [480., 270.]);
+        let expanded = [pair[0].clone(), pair[1].clone(), d];
+        follow_displays(&mut profiles, &mut s, &display_set(&expanded));
+        let layout = Layout::new(&expanded, &s.calibration);
+        assert_eq!(layout.panels[..2], panels);
+        assert_eq!(layout.media(&s, &s.wallpaper), pair_image);
+
+        follow_displays(&mut profiles, &mut s, &display_set(&trio));
+        assert_eq!(
+            Layout::new(&trio, &s.calibration).media(&s, &s.wallpaper),
+            trio_image
+        );
+        follow_displays(&mut profiles, &mut s, &display_set(&pair));
+        assert_eq!(
+            Layout::new(&pair, &s.calibration).media(&s, &s.wallpaper),
+            pair_image
+        );
+    }
+
+    #[test]
     fn profiles_remember_a_framing_for_each_display_set() {
         let a = display("a", Rect::new(0., 0., 1920., 1080.), [480., 270.]);
         let b = display("b", Rect::new(1920., 0., 1920., 1080.), [480., 270.]);
@@ -716,7 +772,6 @@ mod tests {
     #[test]
     fn following_monitors_preserves_newer_layout_edits_and_distinguishes_duplicate_mode() {
         let mut a = display("a", Rect::new(0., 0., 1920., 1080.), [480., 270.]);
-        let layout = Layout::new(std::slice::from_ref(&a), &BTreeMap::new());
         let mut s = Settings::new(Media {
             path: "old.png".into(),
             width: 1920,
@@ -726,7 +781,7 @@ mod tests {
         remember(&mut profiles, &mut s, "a");
         s.wallpaper.media.path = "new.png".into();
         s.wallpaper.center = [10., 20.];
-        follow_displays(&mut profiles, &mut s, &layout, "a");
+        follow_displays(&mut profiles, &mut s, "a");
         assert_eq!(s.wallpaper.media.path.to_str(), Some("new.png"));
         assert_eq!(s.wallpaper.center, [10., 20.]);
         assert_eq!(profiles[0].media.path, s.wallpaper.media.path);
@@ -734,9 +789,10 @@ mod tests {
         let duplicated = display_set(std::slice::from_ref(&a));
         assert_ne!(duplicated, "a");
         assert_ne!(duplicated, "a|b");
-        follow_displays(&mut profiles, &mut s, &layout, &duplicated);
-        assert_eq!(s.wallpaper.center, layout.bounds.center());
-        follow_displays(&mut profiles, &mut s, &layout, "a");
+        follow_displays(&mut profiles, &mut s, &duplicated);
+        assert_eq!(s.wallpaper.center, [10., 20.]);
+        s.wallpaper.center = [30., 40.];
+        follow_displays(&mut profiles, &mut s, "a");
         assert_eq!(s.wallpaper.center, [10., 20.]);
         let old = br#"{"name":"Old","media":{"path":"wall","width":100,"height":100},"framings":{"a":{"scale":2,"center":[0,0]}}}"#;
         let p: Profile = serde_json::from_slice(old).unwrap();

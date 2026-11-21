@@ -161,12 +161,24 @@ fn save_in<T: serde::Serialize>(dir: &Path, name: &str, value: &T) -> Result<()>
 pub struct Preferences {
     pub close_to_tray: bool,
     pub maintain_ratio: bool,
+    pub fullscreen: PlaybackAction,
+    pub battery_saver: PlaybackAction,
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlaybackAction {
+    Continue,
+    Pause,
+    Stop,
+}
+
 impl Default for Preferences {
     fn default() -> Self {
         Self {
             close_to_tray: true,
             maintain_ratio: true,
+            fullscreen: PlaybackAction::Continue,
+            battery_saver: PlaybackAction::Continue,
         }
     }
 }
@@ -429,7 +441,14 @@ mod tests {
         assert!(load_preferences_from(&path).close_to_tray);
 
         fs::write(&path, r#"{"close_to_tray":false}"#).unwrap();
-        assert!(!load_preferences_from(&path).close_to_tray);
+        let mut previous = load_preferences_from(&path);
+        assert!(!previous.close_to_tray);
+        assert_eq!(previous.fullscreen, PlaybackAction::Continue);
+        assert_eq!(previous.battery_saver, PlaybackAction::Continue);
+        previous.fullscreen = PlaybackAction::Stop;
+        previous.battery_saver = PlaybackAction::Pause;
+        save_in(dir.path(), "preferences.json", &previous).unwrap();
+        assert_eq!(load_preferences_from(&path), previous);
 
         fs::write(&path, r#"{}"#).unwrap();
         assert!(load_preferences_from(&path).close_to_tray);

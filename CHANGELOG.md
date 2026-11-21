@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## v0.2.0
+
+- Multi-mode switches preload the replacement wallpapers and fade them in together after their first rendered frames. A loading circle beside the switch shows when the transition is in progress.
+- Added playback actions for fullscreen apps and Windows Energy Saver. Advanced shows the assigned file and playback status for the selected display.
+- Settings expands to fit all sections and scrolls in shorter windows.
+- Connecting or disconnecting a monitor preserves the spanning wallpaper’s position and scale on the remaining screens. A saved framing in the active profile takes precedence for that exact monitor setup.
+
 ## v0.1.5
 
 ### Added

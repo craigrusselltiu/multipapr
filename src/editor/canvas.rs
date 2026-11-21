@@ -658,6 +658,49 @@ mod tests {
     }
 
     #[test]
+    fn mode_switch_shows_a_spinner_to_the_left_without_moving_the_switch() {
+        let ctx = Context::default();
+        let mut editor = covered(&ctx);
+        let mut previous = None;
+        for pending in [false, true, false] {
+            editor.mode_switch = pending.then(std::time::SystemTime::now);
+            let output = ctx.run(
+                RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(760., 450.))),
+                    ..Default::default()
+                },
+                |ctx| editor.workspace(ctx),
+            );
+            let switch = output
+                .shapes
+                .iter()
+                .find_map(|s| match &s.shape {
+                    Shape::Rect(r) if r.rect.size() == vec2(38., 22.) => Some(r.rect),
+                    _ => None,
+                })
+                .unwrap();
+            let spinner = output.shapes.iter().find_map(|s| match &s.shape {
+                Shape::Path(p)
+                    if p.points.len() == 20
+                        && p.points.iter().all(|pt| {
+                            pt.x < switch.left()
+                                && pt.x >= switch.left() - 32.
+                                && (pt.y - switch.center().y).abs() <= 8.
+                        }) =>
+                {
+                    Some(p)
+                }
+                _ => None,
+            });
+            assert_eq!(spinner.is_some(), pending);
+            if let Some(rect) = previous {
+                assert_eq!(switch, rect);
+            }
+            previous = Some(switch);
+        }
+    }
+
+    #[test]
     fn workspace_keeps_zoom_controls_in_the_corner_and_inspector_values_visible() {
         for (size, multi) in [
             (vec2(1080., 680.), false),

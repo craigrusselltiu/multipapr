@@ -58,7 +58,7 @@ irm https://raw.githubusercontent.com/craigrusselltiu/multipapr/main/install.ps1
   <tr><td><b>Undo</b></td><td><kbd>Ctrl</kbd>+<kbd>Z</kbd> to undo, <kbd>Ctrl</kbd>+<kbd>Y</kbd> or <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Z</kbd> to redo, or use the arrows in the title bar.</td></tr>
   <tr><td><b>Select</b></td><td>Click a display or wallpaper to select it. The purple outline and resize handles show what you’re editing. Click the same spot again to cycle through overlapping items, or click empty canvas to clear the selection.</td></tr>
   <tr><td><b>Multi-mode</b></td><td>Give each display its own wallpaper. Select a display to see its full wallpaper and adjust its framing. Click empty canvas to preview every wallpaper cropped to its display. Open <b>Advanced</b> below Wallpaper for exact display sizes and offsets.</td></tr>
-  <tr><td><b>Profiles</b></td><td>The bookmark in the title bar lists your wallpaper setups. Each one remembers its framing for every combination of connected monitors and switches with them, so docking or undocking brings back the right look. Edits save automatically.</td></tr>
+  <tr><td><b>Profiles</b></td><td>The bookmark in the title bar lists your wallpaper setups. Connecting or disconnecting a monitor keeps the same crop on the remaining screens. If the active profile has a saved framing for that exact monitor combination, Multipapr restores it. Edits save automatically.</td></tr>
   <tr><td><b>Lock axis</b></td><td>Hold <kbd>Ctrl</kbd> for horizontal, <kbd>Ctrl</kbd>+<kbd>Shift</kbd> for vertical.</td></tr>
   <tr><td><b>Tray</b></td><td>Click to reopen. Right-click → <b>Close</b> to stop the wallpaper.</td></tr>
   <tr><td><b>Settings</b></td><td>Toggle <b>Start at sign-in</b>, <b>Close to system tray</b> or update Multipapr from the cog icon.</td></tr>
@@ -69,7 +69,9 @@ irm https://raw.githubusercontent.com/craigrusselltiu/multipapr/main/install.ps1
 > [!NOTE]
 > Playback uses [mpv](https://mpv.io/), which is built into the exe and unpacked once on first use.
 >
-> A single mpv instance decodes the video once, on the GPU where possible, and one shader maps it to every display. Multi-mode runs one instance per display. Audio, interpolation and network caching are off. Playback **pauses** when the desktop is locked or a fullscreen window covers it, and it recovers after Explorer restarts or displays change. A still image renders once and then stays idle.
+> A single mpv instance decodes the video once, on the GPU where possible, and one shader maps it to every display. Multi-mode runs one instance per display. Audio, interpolation and network caching are off. Playback pauses when Windows locks. In **Settings → Playback**, **Fullscreen game detected** can keep visible displays playing, pause every wallpaper, or stop the players to free memory. This applies to fullscreen foreground apps, including borderless games. **Battery saver** can keep playing, pause, or stop when Windows turns on Energy Saver. Playback resumes when the condition clears. Multipapr also restores its wallpaper surfaces after Explorer restarts or displays change. A still image renders once and then stays idle.
+>
+> Switching Multi-mode keeps the current wallpaper visible while the replacement players load, then fades to the new layout. A loading circle beside the switch stays visible until the transition finishes. Open **Advanced** for the selected display’s assigned file and playback status.
 
 ## CLI
 

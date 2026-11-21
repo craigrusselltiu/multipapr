@@ -24,7 +24,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
         mpsc::{Receiver, TryRecvError, channel},
     },
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime},
 };
 
 const INK: Color32 = Color32::from_rgb(22, 22, 25);
@@ -165,7 +165,10 @@ struct Editor {
     update: preferences::UpdateState,
     message: String,
     last_check: Instant,
+    last_playback_check: Instant,
+    mode_switch: Option<SystemTime>,
     playback_error: Option<String>,
+    playback: Option<host::PlaybackReport>,
     undo: Vec<HistoryStep>,
     redo: Vec<HistoryStep>,
     committed: HistoryStep,
@@ -215,7 +218,7 @@ impl Editor {
         let mut profiles_dirty = false;
         if profiles_error.is_none() {
             let before = profiles.clone();
-            follow_displays(&mut profiles, &mut settings, &layout, &set);
+            follow_displays(&mut profiles, &mut settings, &set);
             profiles_dirty = profiles != before;
         } else {
             settings.display_set = set;
@@ -297,7 +300,10 @@ impl Editor {
             update: preferences::UpdateState::default(),
             message: String::new(),
             last_check: Instant::now(),
+            last_playback_check: Instant::now(),
+            mode_switch: None,
             playback_error: None,
+            playback: None,
             undo: Vec::new(),
             redo: Vec::new(),
             edit_focus: None,
@@ -526,7 +532,6 @@ impl Editor {
             follow_displays(
                 &mut self.profiles,
                 &mut self.settings,
-                &layout,
                 &display_set(&self.displays),
             );
             self.profiles_dirty |= self.profiles != previous;
@@ -605,13 +610,20 @@ impl Editor {
                 ui.label(RichText::new("Multi-mode").color(TEXT));
                 icons::info(ui, "Give each display its own wallpaper.");
                 ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
-                    preferences::toggle_switch(ui, &mut multi, "Multi-mode").changed()
+                    let changed =
+                        preferences::toggle_switch(ui, &mut multi, "Multi-mode").changed();
+                    if self.mode_switch.is_some() {
+                        ui.add(Spinner::new().size(16.).color(ACCENT))
+                            .on_hover_text("Switching wallpaper layout…");
+                    }
+                    changed
                 })
                 .inner
             })
             .inner;
         if switched {
             self.set_multi(multi);
+            ui.ctx().request_repaint();
         }
         ui.add_space(2.);
         ui.add_sized(
@@ -835,6 +847,35 @@ impl Editor {
         }
     }
     fn advanced(&mut self, ui: &mut Ui) {
+        let id = &self.displays[self.selected].id;
+        let assigned = &self.settings.shown(id).media.path;
+        let state = if assigned.as_os_str().is_empty() {
+            "No wallpaper assigned"
+        } else {
+            self.playback
+                .as_ref()
+                .and_then(|report| report.displays.get(id))
+                .filter(|(file, _)| file == assigned)
+                .map_or("Waiting for playback status…", |(_, state)| {
+                    state.as_str()
+                })
+        };
+        ui.label(
+            RichText::new(format!("Playback · {state}"))
+                .small()
+                .color(MUTED),
+        );
+        if !assigned.as_os_str().is_empty() {
+            ui.add(
+                Label::new(
+                    RichText::new(assigned.to_string_lossy())
+                        .small()
+                        .color(MUTED),
+                )
+                .wrap(),
+            );
+        }
+        ui.separator();
         let i = self.selected;
         let d = &self.displays[i];
         let l = self.layout();
@@ -1179,7 +1220,7 @@ impl Editor {
                         let parameters =
                             shader::parameters(&layout, &self.settings, &self.displays, part);
                         delivered &= host::update_mapping(
-                            &host::player_pipe(host, part, &self.displays),
+                            &host::player_pipe(host, self.settings.multi, part, &self.displays),
                             &parameters,
                         )
                         .is_ok();
@@ -1226,6 +1267,21 @@ impl Editor {
                 {
                     self.message = e.to_string();
                 }
+                if self.saved.multi != self.settings.multi {
+                    self.mode_switch = if host::running()
+                        && (playing(&self.settings, &self.displays)
+                            || playing(&self.saved, &self.displays))
+                    {
+                        storage::home().ok().and_then(|dir| {
+                            std::fs::metadata(dir.join("layout.json"))
+                                .ok()?
+                                .modified()
+                                .ok()
+                        })
+                    } else {
+                        None
+                    };
+                }
                 self.saved = self.settings.clone();
             }
             Err(e) => self.message = format!("Could not save layout · {e:#}"),
@@ -1243,12 +1299,38 @@ impl eframe::App for Editor {
             {
                 self.update_displays(d);
             }
-            self.playback_error = storage::home()
-                .ok()
-                .and_then(|dir| std::fs::read_to_string(dir.join("host-error.txt")).ok());
             self.last_check = Instant::now();
         }
-        ctx.request_repaint_after(Duration::from_secs(3));
+        let poll_interval = if self.mode_switch.is_some() {
+            Duration::from_millis(100)
+        } else {
+            Duration::from_secs(3)
+        };
+        if self.last_playback_check.elapsed() >= poll_interval {
+            let dir = storage::home().ok();
+            self.playback_error = dir
+                .as_ref()
+                .and_then(|dir| std::fs::read_to_string(dir.join("host-error.txt")).ok());
+            self.playback = dir
+                .and_then(|dir| std::fs::read(dir.join("playback.json")).ok())
+                .and_then(|data| serde_json::from_slice::<host::PlaybackReport>(&data).ok())
+                .filter(|report| {
+                    self.host
+                        .map_or_else(host::running, |pid| pid == report.host)
+                });
+            if let Some(requested) = self.mode_switch
+                && (self.playback_error.is_some()
+                    || !host::running()
+                    || self
+                        .playback
+                        .as_ref()
+                        .is_some_and(|report| report.switch_finished(requested)))
+            {
+                self.mode_switch = None;
+            }
+            self.last_playback_check = Instant::now();
+        }
+        ctx.request_repaint_after(poll_interval);
         if self.popup.is_none()
             && let Some(path) =
                 ctx.input(|i| i.raw.dropped_files.first().and_then(|f| f.path.clone()))

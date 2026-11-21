@@ -58,8 +58,7 @@ impl Surface {
             }
             let (parent, insert_after) =
                 layer.context("Waiting for Explorer’s wallpaper surface")?;
-            let raised = parent == prog;
-            let ex = WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | if raised { WS_EX_LAYERED } else { 0 };
+            let ex = WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_LAYERED;
             let hwnd = CreateWindowExW(
                 ex,
                 wide("STATIC").as_ptr(),
@@ -80,15 +79,29 @@ impl Surface {
                 std::io::Error::last_os_error()
             );
             let surface = Self { hwnd, parent };
-            if raised {
-                ensure!(
-                    SetLayeredWindowAttributes(hwnd, 0, 255, LWA_ALPHA) != 0,
-                    "Cannot configure desktop composition"
-                );
-            }
+            surface.opacity(0)?;
             surface.place(r, insert_after)?;
             Ok(surface)
         }
+    }
+    pub fn raise(&self, desktop: Rect) -> Result<()> {
+        unsafe {
+            let (parent, anchor) = wallpaper_layer(find(null_mut(), null_mut(), "Progman"))
+                .context("Waiting for Windows Explorer")?;
+            ensure!(
+                parent == self.parent,
+                "Explorer recreated the wallpaper surface"
+            );
+            self.place(desktop, anchor)
+        }
+    }
+    pub fn opacity(&self, alpha: u8) -> Result<()> {
+        ensure!(
+            unsafe { SetLayeredWindowAttributes(self.hwnd, 0, alpha, LWA_ALPHA) } != 0,
+            "Cannot change wallpaper opacity: {}",
+            std::io::Error::last_os_error()
+        );
+        Ok(())
     }
     fn place(&self, desktop: Rect, anchor: HWND) -> Result<()> {
         let mut pt = POINT {
@@ -167,7 +180,7 @@ impl Drop for Surface {
     }
 }
 
-pub fn locked_or_covered(desktop: Rect) -> bool {
+pub fn locked() -> bool {
     unsafe {
         let input = OpenInputDesktop(0, 0, DESKTOP_READOBJECTS);
         if input.is_null() {
@@ -183,29 +196,42 @@ pub fn locked_or_covered(desktop: Rect) -> bool {
             &mut needed,
         );
         CloseDesktop(input);
-        if ok != 0
+        ok != 0
             && !String::from_utf16_lossy(&name)
                 .trim_end_matches('\0')
                 .eq_ignore_ascii_case("Default")
-        {
-            return true;
-        }
+    }
+}
+
+pub fn battery_saver() -> bool {
+    unsafe {
+        let mut status = std::mem::zeroed();
+        windows_sys::Win32::System::Power::GetSystemPowerStatus(&mut status) != 0
+            && status.SystemStatusFlag == 1
+    }
+}
+
+pub fn foreground_bounds() -> Option<Rect> {
+    unsafe {
         let fg = GetForegroundWindow();
         if fg.is_null() {
-            return false;
+            return None;
         }
         let mut class = [0u16; 128];
         let n = GetClassNameW(fg, class.as_mut_ptr(), 128);
         let class = String::from_utf16_lossy(&class[..n as usize]);
         if matches!(class.as_str(), "Progman" | "WorkerW" | "Shell_TrayWnd") {
-            return false;
+            return None;
         }
         let mut rect: RECT = std::mem::zeroed();
-        GetWindowRect(fg, &mut rect) != 0
-            && rect.left <= desktop.x as i32
-            && rect.top <= desktop.y as i32
-            && rect.right >= desktop.right() as i32
-            && rect.bottom >= desktop.bottom() as i32
+        (GetWindowRect(fg, &mut rect) != 0).then(|| {
+            Rect::new(
+                rect.left as f32,
+                rect.top as f32,
+                (rect.right - rect.left) as f32,
+                (rect.bottom - rect.top) as f32,
+            )
+        })
     }
 }
 pub fn dispatch(handles: &[HANDLE], timeout: u32) -> u32 {
