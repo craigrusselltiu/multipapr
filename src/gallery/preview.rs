@@ -1,6 +1,5 @@
 use super::{
-    COMMONS_TRANSCODES, Format, Listing, Source, desktophut, get, motionbgs, read_wallpaper_header,
-    trusted_url,
+    Format, Listing, Source, desktophut, get, motionbgs, read_wallpaper_header, trusted_url,
 };
 use crate::{http::Cancellation, process, storage};
 use anyhow::{Context, Result, bail, ensure};
@@ -30,10 +29,7 @@ impl PreviewFrames {
 }
 
 pub(super) fn video_url(source: Source, raw: &str) -> Option<Url> {
-    let url = match source {
-        Source::Commons => trusted_url(raw, &[COMMONS_TRANSCODES]),
-        Source::Nasa => trusted_url(raw, &["https://images-assets.nasa.gov/video/"])
-            .filter(|url| url.path().ends_with("~preview.mp4")),
+    match source {
         Source::DesktopHut => {
             trusted_url(raw, desktophut::PREVIEWS).filter(|url| url.path().ends_with(".mp4"))
         }
@@ -48,18 +44,8 @@ pub(super) fn video_url(source: Source, raw: &str) -> Option<Url> {
                         && name.ends_with(".960x540.mp4")
                 })
         }),
-    }?;
-    video_format(&url)?;
-    Some(url)
-}
-
-fn video_format(url: &Url) -> Option<Format> {
-    Some(match url.path().rsplit_once('.')?.1 {
-        "mp4" => Format::Mp4,
-        "webm" => Format::Webm,
-        "ogv" => Format::Ogv,
-        _ => return None,
-    })
+        Source::Wallhaven => None,
+    }
 }
 
 pub fn motion_preview(listing: &Listing, cancellation: &Cancellation) -> Result<PreviewFrames> {
@@ -76,14 +62,12 @@ pub fn motion_preview(listing: &Listing, cancellation: &Cancellation) -> Result<
             _ => bail!("Wallpaper has no video preview"),
         }
     };
-    let format = video_format(&url).context("Unsupported video preview format")?;
     let response = get(&url, 10_000, Some(cancellation))?;
     let mime = response
         .header_string(WINHTTP_QUERY_CONTENT_TYPE)
         .unwrap_or_default();
     ensure!(
-        Format::from_mime(mime.split(';').next().unwrap_or_default().trim())
-            .is_some_and(|kind| kind.extension() == format.extension()),
+        Format::from_mime(&mime) == Some(Format::Mp4),
         "Unsupported preview content type"
     );
     ensure!(
@@ -94,14 +78,8 @@ pub fn motion_preview(listing: &Listing, cancellation: &Cancellation) -> Result<
     );
     let bytes = response.read_all(MAX_VIDEO_BYTES)?;
     cancellation.check()?;
-    read_wallpaper_header(format, &mut bytes.as_slice())?;
-    let demuxer = match format {
-        Format::Mp4 => "mov",
-        Format::Webm => "matroska",
-        Format::Ogv => "ogg",
-        _ => bail!("Unsupported video preview format"),
-    };
-    decode(Some(demuxer), None, bytes)
+    read_wallpaper_header(Format::Mp4, &mut bytes.as_slice())?;
+    decode(Some("mov"), None, bytes)
 }
 
 pub fn local_motion_preview(path: &Path) -> Result<PreviewFrames> {
@@ -192,16 +170,6 @@ mod tests {
                 Source::DesktopHut,
                 "https://media.desktophut.com/previews/forest-preview.mp4",
                 "https://media.desktophut.com/files/forest.mp4",
-            ),
-            (
-                Source::Commons,
-                "https://upload.wikimedia.org/wikipedia/commons/transcoded/1/10/Rain.webm/Rain.webm.240p.vp9.webm",
-                "https://upload.wikimedia.org/wikipedia/commons/1/10/Rain.webm",
-            ),
-            (
-                Source::Nasa,
-                "https://images-assets.nasa.gov/video/Orbit/Orbit~preview.mp4",
-                "https://images-assets.nasa.gov/video/Orbit/Orbit~orig.mp4",
             ),
         ] {
             assert!(video_url(source, preview).is_some());

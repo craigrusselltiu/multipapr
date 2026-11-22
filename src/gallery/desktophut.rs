@@ -2,10 +2,15 @@ use super::{Criteria, Format, Listing, Page, SearchCursor, Source, get, preview,
 use crate::http::Cancellation;
 use anyhow::{Result, ensure};
 use scraper::{Html, Selector};
+use std::{
+    collections::HashSet,
+    sync::{Mutex, mpsc::channel},
+};
 use url::Url;
 
 const ROOT: &str = "https://www.desktophut.com/";
 const POPULAR_PATH: &str = "/popular-live-wallpapers";
+const DETAIL_WORKERS: usize = 8;
 pub(super) const PREVIEWS: &[&str] = &[
     "https://www.desktophut.com/previews/",
     "https://media.desktophut.com/previews/",
@@ -41,6 +46,7 @@ fn document(url: &Url, cancellation: &Cancellation) -> Result<Html> {
 pub(super) fn search(
     criteria: &Criteria,
     from: Option<&Url>,
+    pages: u8,
     cancellation: &Cancellation,
 ) -> Result<Page> {
     let mut url = Url::parse(ROOT)?;
@@ -55,21 +61,43 @@ pub(super) fn search(
             .push(&criteria.text);
     }
     ensure!(search_page(&url), "Unexpected DesktopHut search URL");
-    let page = parse(&document(&url, cancellation)?, &url, criteria)?;
-    confirm_downloads(page, cancellation, |url| document(url, cancellation))
+    let first = parse(&document(&url, cancellation)?, &url, criteria)?;
+    let mut next = first.next.clone();
+    let mut visited = HashSet::from([url]);
+    let more = std::iter::from_fn(|| {
+        let SearchCursor::DesktopHut(Some(url)) = next.take()? else {
+            return None;
+        };
+        if !visited.insert(url.clone()) {
+            return None;
+        }
+        let mut page = parse(&document(&url, cancellation).ok()?, &url, criteria).ok()?;
+        page.next = page.next.filter(|cursor| {
+            matches!(cursor, SearchCursor::DesktopHut(Some(url)) if !visited.contains(url))
+        });
+        next = page.next.clone();
+        Some(page)
+    });
+    let batch = std::iter::once(first).chain(more).take(usize::from(pages));
+    confirm_downloads(batch, cancellation, |url| document(url, cancellation))
 }
 
 fn confirm_downloads(
-    mut page: Page,
+    pages: impl IntoIterator<Item = Page>,
     cancellation: &Cancellation,
     read_details: impl Fn(&Url) -> Result<Html> + Sync,
 ) -> Result<Page> {
-    for batch in page.listings.chunks_mut(4) {
-        cancellation.check()?;
-        std::thread::scope(|scope| {
-            for listing in batch {
-                let read_details = &read_details;
-                scope.spawn(move || {
+    let (submit, waiting) = channel::<(usize, Listing)>();
+    let waiting = Mutex::new(waiting);
+    let (confirmed, finished) = channel();
+    let next = std::thread::scope(|scope| {
+        for _ in 0..DETAIL_WORKERS {
+            scope.spawn(|| {
+                while cancellation.check().is_ok() {
+                    let task = waiting.lock().expect("detail queue").recv();
+                    let Ok((position, mut listing)) = task else {
+                        break;
+                    };
                     if let Some(url) = wallpaper_url(&listing.page)
                         && let Ok(html) = read_details(&url)
                         && let Some(download) = download_link(&html, &url)
@@ -78,15 +106,29 @@ fn confirm_downloads(
                         if listing.preview.is_none() {
                             listing.preview = preview_link(&html, &url);
                         }
+                        let _ = confirmed.send((position, listing));
                     }
-                });
+                }
+            });
+        }
+        let mut position = 0;
+        let mut next = None;
+        // Checks run as each index page supplies candidates to the workers.
+        for page in pages {
+            next = page.next;
+            for listing in page.listings {
+                let _ = submit.send((position, listing));
+                position += 1;
             }
-        });
-    }
+        }
+        drop(submit);
+        next
+    });
     cancellation.check()?;
-    page.listings
-        .retain(|listing| listing.original_mp4.is_some());
-    Ok(page)
+    let mut listings: Vec<_> = finished.try_iter().collect();
+    listings.sort_unstable_by_key(|(position, _)| *position);
+    let listings = listings.into_iter().map(|(_, listing)| listing).collect();
+    Ok(Page { listings, next })
 }
 
 fn parse(document: &Html, url: &Url, criteria: &Criteria) -> Result<Page> {
@@ -152,7 +194,6 @@ fn parse(document: &Html, url: &Url, criteria: &Criteria) -> Result<Page> {
                 preview,
                 trending: url.path() == POPULAR_PATH && url.query().is_none(),
                 format: Format::Mp4,
-                keywords: String::new(),
             }
             .validate()
             .filter(|item| criteria.matches_filters(item))
@@ -246,8 +287,12 @@ mod tests {
             })
             .collect::<String>();
         let url = Url::parse("https://www.desktophut.com/popular-live-wallpapers").unwrap();
-        let page = parse(&Html::parse_document(&cards), &url, &Criteria::default()).unwrap();
-        let checked = confirm_downloads(page, &Cancellation::default(), |url| {
+        let mut page = parse(&Html::parse_document(&cards), &url, &Criteria::default()).unwrap();
+        let more = Page {
+            listings: page.listings.split_off(3),
+            next: None,
+        };
+        let checked = confirm_downloads([page, more], &Cancellation::default(), |url| {
             let detail = match url.path() {
                 "/preview-only" => "<video id=nativePlayer src=/previews/promo.mp4></video>",
                 "/night-forest" => r#"

@@ -1,4 +1,4 @@
-use super::{INK, LINE};
+use super::{INK, LINE, heading_font};
 use eframe::egui::*;
 
 const FADE_SECONDS: f32 = 0.2;
@@ -23,6 +23,29 @@ pub(super) fn dialog(id: Id, size: Vec2, margin: Margin, opacity: f32) -> Modal 
                 .corner_radius(14)
                 .stroke(Stroke::new(1.0_f32, LINE.gamma_multiply(opacity))),
         )
+}
+
+pub(super) fn header<R>(ui: &mut Ui, title: &str, controls: impl FnOnce(&mut Ui) -> R) -> R {
+    Frame::new()
+        .inner_margin(Margin {
+            left: 22,
+            right: 14,
+            top: 10,
+            bottom: 10,
+        })
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new(title)
+                        .font(heading_font(15.5))
+                        .color(Color32::from_gray(244)),
+                );
+                controls(ui)
+            })
+            .inner
+        })
+        .inner
 }
 
 pub(super) struct ClosingPopup {

@@ -1153,6 +1153,8 @@ impl Editor {
             self.message = missing.missing_wallpaper(next.multi);
             return false;
         }
+        // The active paths passed validation. Fit the spanning wallpaper to any unassigned displays.
+        next.restore_multi_wallpapers(&self.displays, &layout, |_| true);
         self.remember_current();
         self.settings = next;
         self.start_profile();

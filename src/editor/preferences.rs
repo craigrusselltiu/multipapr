@@ -286,7 +286,7 @@ pub(super) fn toggle_switch(ui: &mut Ui, on: &mut bool, label: &str) -> Response
     response.on_hover_cursor(CursorIcon::PointingHand)
 }
 
-fn hairline(ui: &mut Ui) {
+pub(super) fn hairline(ui: &mut Ui) {
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 1.), Sense::hover());
     ui.painter().hline(
         rect.x_range(),
@@ -561,31 +561,12 @@ fn settings_dialog<R>(
         ui.set_width(width);
         ui.set_max_height(bounds.height() - 2.);
         ui.spacing_mut().item_spacing.y = 0.;
-        let close = Frame::new()
-            .inner_margin(Margin {
-                left: 22,
-                right: 14,
-                top: 10,
-                bottom: 10,
+        let close = popup::header(ui, "Settings", |ui| {
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                Icon::Close.button(ui, "Close settings", false).clicked()
             })
-            .show(ui, |ui| {
-                let header_width = width - 36.;
-                ui.set_min_width(header_width);
-                ui.set_max_width(header_width);
-                ui.horizontal(|ui| {
-                    ui.label(
-                        RichText::new("Settings")
-                            .font(heading_font(15.5))
-                            .color(Color32::from_gray(244)),
-                    );
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        Icon::Close.button(ui, "Close settings", false).clicked()
-                    })
-                    .inner
-                })
-                .inner
-            })
-            .inner;
+            .inner
+        });
         hairline(ui);
         let scroll = Frame::new()
             .inner_margin(Margin::symmetric(12, 12))

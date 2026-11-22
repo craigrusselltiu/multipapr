@@ -328,7 +328,6 @@ impl Profile {
         s.wallpaper.media = self.media.clone();
         s.upscaling = self.upscaling;
         s.profile = Some(self.name.clone());
-        s.multi = self.multi;
         s.screens = self.screens.clone();
         s.display_set = set.into();
         match self.framings.get(set) {

@@ -2,6 +2,17 @@
 
 All notable changes to this project are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## v0.3.1
+
+- Gallery uses MotionBGs and DesktopHut for animated wallpapers and Wallhaven's Hot feed for stills. Unfiltered results alternate between all three sources.
+- Wallhaven text searches use the site's relevance ordering and page through its matching results.
+- Search and filters share the Gallery header. The filter panel stays inside the dialog, and hover previews open sooner at a smaller size.
+- Gallery prepares up to two pages per source in the background and reveals the complete batch in source order near the bottom.
+- DesktopHut checks direct download links with up to eight concurrent requests, overlapping those checks with the next listing page.
+- The default feed follows MotionBGs' homepage link into its additional pages.
+- Cards show the resolution, media type, and source. Missing wallpaper messages use simpler wording.
+- Switching profiles preserves the current Multi-mode setting.
+
 ## v0.3.0
 
 - Added **Gallery** beside Profiles, with live picks from MotionBGs and DesktopHut plus Wikimedia Commons and NASA wallpapers. Click a card to apply it with **Fit**, pause over one for a larger preview, or right-click to choose a display or delete a saved copy.

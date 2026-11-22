@@ -121,7 +121,6 @@ fn parse(html: &str, url: &Url, criteria: &Criteria) -> Result<Page> {
                 trending: featured
                     .is_some_and(|grid| card.ancestors().any(|node| node.id() == grid.id())),
                 format: Format::Mp4,
-                keywords: String::new(),
             }
             .validate()
         })
@@ -137,8 +136,14 @@ fn parse(html: &str, url: &Url, criteria: &Criteria) -> Result<Page> {
             }),
         "Unrecognized MotionBGs search results"
     );
+    // The homepage advertises page two with a regular link.
+    let pagination = if url.path() == "/" {
+        "link[rel=next][href], a[href='/2/'], a[href='https://motionbgs.com/2/']"
+    } else {
+        "link[rel=next][href]"
+    };
     let next = document
-        .select(&selector("link[rel=next][href]"))
+        .select(&selector(pagination))
         .filter_map(|element| url.join(element.attr("href")?).ok())
         .find(|next| next != url && search_page(next))
         .map(|next| SearchCursor::MotionBgs(Some(next)));
@@ -211,6 +216,28 @@ mod tests {
         criteria.media = MediaFilter::Still;
         assert!(parse(html, &url, &criteria).unwrap().listings.is_empty());
         assert!(!SearchCursor::MotionBgs(None).supports(&criteria));
+    }
+
+    #[test]
+    fn homepage_continues_through_its_view_more_link() {
+        let html = r#"
+            <main>
+                <section><div class=tmb>
+                    <a title="Forest" href=/forest>
+                        <picture><img src=/i/c/364x205/media/1234/forest.jpg></picture>
+                        <span class=ttl>Forest</span><span class=frm>4K</span>
+                    </a>
+                </div></section>
+                <a class=link--arrowed href=/2/>View More Wallpapers</a>
+            </main>
+        "#;
+        let url = Url::parse(ROOT).unwrap();
+        let page = parse(html, &url, &Criteria::default()).unwrap();
+        assert_eq!(page.listings.len(), 1);
+        assert!(page.listings[0].trending);
+        assert!(
+            matches!(page.next, Some(SearchCursor::MotionBgs(Some(next))) if next.path() == "/2/")
+        );
     }
 
     #[test]

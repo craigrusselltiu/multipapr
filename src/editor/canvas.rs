@@ -1108,6 +1108,45 @@ mod tests {
     }
 
     #[test]
+    fn switching_profiles_keeps_the_current_display_mode() {
+        let ctx = Context::default();
+        let dir = tempfile::tempdir().unwrap();
+        let span = dir.path().join("span.png");
+        std::fs::write(&span, []).unwrap();
+        for multi in [false, true] {
+            let mut editor = covered(&ctx);
+            let mut profile = editor.profiles[0].clone();
+            profile.name = "other".into();
+            profile.multi = !multi;
+            profile.media.path = span.clone();
+            if !multi {
+                let mut screen = editor.settings.wallpaper.clone();
+                screen.media.path = dir.path().join("missing-screen.png");
+                profile.screens.insert("a".into(), screen);
+            }
+            editor.profiles.push(profile);
+            editor.set_multi(multi, |_| true);
+
+            assert!(editor.load_profile(1));
+            assert_eq!(editor.settings.multi, multi);
+            assert_eq!(editor.active_profile(), Some(1));
+            assert_eq!(editor.settings.wallpaper.media.path, span);
+            if multi {
+                let layout = editor.layout();
+                let pitch = layout.pitch(&editor.settings);
+                for (display, panel) in editor.displays.iter().zip(layout.panels) {
+                    let mut expected =
+                        crate::layout::Wallpaper::new(editor.settings.wallpaper.media.clone());
+                    expected.cover(pitch, panel);
+                    assert!(editor.settings.shown(&display.id) == &expected);
+                }
+            } else {
+                assert!(editor.settings.shown("a") == &editor.settings.wallpaper);
+            }
+        }
+    }
+
+    #[test]
     fn switching_profiles_validates_only_the_files_on_connected_screens() {
         let ctx = Context::default();
         let mut editor = covered(&ctx);
@@ -1117,18 +1156,23 @@ mod tests {
         let mut profile = editor.profiles[0].clone();
         profile.name = "separate".into();
         profile.media.path = dir.path().join("missing-span");
-        profile.multi = true;
+        profile.multi = false;
         for id in ["a", "b"] {
             let mut w = editor.settings.wallpaper.clone();
             w.media.path = file.clone();
             profile.screens.insert(id.into(), w);
         }
+        let mut disconnected = editor.settings.wallpaper.clone();
+        disconnected.media.path = dir.path().join("disconnected.jpg");
+        profile.screens.insert("disconnected".into(), disconnected);
         editor.profiles.push(profile);
+        editor.set_multi(true, |_| true);
         assert!(editor.load_profile(1));
+        assert!(editor.settings.multi);
         editor.profiles[0].media.path = dir.path().join("missing");
+        editor.profiles[0].screens.clear();
         assert!(!editor.load_profile(0));
         assert_eq!(editor.active_profile(), Some(1));
-        editor.profiles[0].multi = true;
         editor.profiles[0].screens = editor.settings.screens.clone();
         editor.profiles[0].screens.get_mut("b").unwrap().media.path = dir.path().join("gone.jpg");
         assert!(!editor.load_profile(0));
