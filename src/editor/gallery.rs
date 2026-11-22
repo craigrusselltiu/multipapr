@@ -1,6 +1,6 @@
 use super::{
-    ACCENT, FIELD, INK, LINE, MUTED, TEXT, heading_font, icons::Icon, popup, preferences::hairline,
-    texture,
+    ACCENT, FIELD, INK, LINE, MUTED, TEXT, heading_font, icons::Icon, popup, popup::Hint,
+    preferences::hairline, texture,
 };
 use crate::gallery::{
     self, Catalog, Criteria, Listing, MediaFilter, Page, PreparedWallpaper, PreviewFrames, Removal,
@@ -788,7 +788,7 @@ impl Gallery {
             let submit = self.search_field(ui, opening, width);
             let filter = Icon::Filter
                 .button(ui, "Filter wallpapers", open || filtered)
-                .on_hover_text("Filter wallpapers");
+                .hint("Filter wallpapers");
             let close = Icon::Close.button(ui, "Close gallery", false).clicked();
             (submit, filter, close)
         });

@@ -27,11 +27,6 @@ float jinc(float x) {
 }
 float kernel(float x) {
     x = abs(x);
-    if (upscaler == 1) {
-        if (x < 1.0) return (1.5 * x - 2.5) * x * x + 1.0;
-        if (x < 2.0) return ((-0.5 * x + 2.5) * x - 4.0) * x + 2.0;
-        return 0.0;
-    }
     if (upscaler == 2) {
         if (x < 1.0) return ((13.0 / 11.0 * x - 453.0 / 209.0) * x - 3.0 / 209.0) * x + 1.0;
         if (x < 2.0) { x -= 1.0; return ((-6.0 / 11.0 * x + 270.0 / 209.0) * x - 156.0 / 209.0) * x; }
@@ -43,26 +38,55 @@ float kernel(float x) {
     float p = 3.14159265 * x;
     return 3.0 * sin(p) * sin(p / 3.0) / (p * p);
 }
+// Catmull-Rom from nine bilinear fetches instead of sixteen point samples.
+vec4 catmull_rom(vec2 pos, vec2 base) {
+    vec2 f = pos - base;
+    vec2 w0 = f * (-0.5 + f * (1.0 - 0.5 * f));
+    vec2 w1 = 1.0 + f * f * (-2.5 + 1.5 * f);
+    vec2 w2 = f * (0.5 + f * (2.0 - 1.5 * f));
+    vec2 w3 = f * f * (-0.5 + 0.5 * f);
+    vec2 w12 = w1 + w2;
+    vec2 t0 = (base - 0.5) * HOOKED_pt;
+    vec2 t12 = (base + 0.5 + w2 / w12) * HOOKED_pt;
+    vec2 t3 = (base + 2.5) * HOOKED_pt;
+    return (HOOKED_tex(vec2(t0.x, t0.y)) * w0.x + HOOKED_tex(vec2(t12.x, t0.y)) * w12.x + HOOKED_tex(vec2(t3.x, t0.y)) * w3.x) * w0.y
+        + (HOOKED_tex(vec2(t0.x, t12.y)) * w0.x + HOOKED_tex(vec2(t12.x, t12.y)) * w12.x + HOOKED_tex(vec2(t3.x, t12.y)) * w3.x) * w12.y
+        + (HOOKED_tex(vec2(t0.x, t3.y)) * w0.x + HOOKED_tex(vec2(t12.x, t3.y)) * w12.x + HOOKED_tex(vec2(t3.x, t3.y)) * w3.x) * w3.y;
+}
 vec4 source(vec2 uv) {
     if (upscaler == 0) return HOOKED_tex(uv);
     vec2 pos = uv * HOOKED_size - 0.5;
     vec2 base = floor(pos);
+    if (upscaler == 1) return catmull_rom(pos, base);
     vec2 f = pos - base;
-    int r = upscaler == 1 ? 2 : upscaler == 4 ? 4 : 3;
     vec4 sum = vec4(0.0);
-    float total = 0.0;
-    for (int y = 1 - r; y <= r; y++) {
-        for (int x = 1 - r; x <= r; x++) {
-            vec2 d = vec2(float(x), float(y)) - f;
-            float w;
-            if (upscaler == 4) {
-                const float radius = 3.2383154841662362;
-                float dist = length(d);
-                if (dist >= radius) continue;
-                w = jinc(dist / 0.9812505644269356) * jinc(dist * 1.2196698912665045 / radius);
-            } else {
-                w = kernel(d.x) * kernel(d.y);
+    if (upscaler != 4) {
+        // Separable kernels: twelve weights per pixel instead of seventy-two.
+        float wx[6];
+        float wy[6];
+        vec2 total = vec2(0.0);
+        for (int i = 0; i < 6; i++) {
+            wx[i] = kernel(float(i - 2) - f.x);
+            wy[i] = kernel(float(i - 2) - f.y);
+            total += vec2(wx[i], wy[i]);
+        }
+        for (int y = 0; y < 6; y++) {
+            vec4 row = vec4(0.0);
+            for (int x = 0; x < 6; x++) {
+                row += wx[x] * HOOKED_tex((base + vec2(float(x - 2), float(y - 2)) + 0.5) * HOOKED_pt);
             }
+            sum += wy[y] * row;
+        }
+        return sum / (total.x * total.y);
+    }
+    const float radius = 3.2383154841662362;
+    float total = 0.0;
+    for (int y = -3; y <= 4; y++) {
+        for (int x = -3; x <= 4; x++) {
+            vec2 d = vec2(float(x), float(y)) - f;
+            float dist = length(d);
+            if (dist >= radius) continue;
+            float w = jinc(dist / 0.9812505644269356) * jinc(dist * 1.2196698912665045 / radius);
             sum += w * HOOKED_tex((base + vec2(float(x), float(y)) + 0.5) * HOOKED_pt);
             total += w;
         }
@@ -140,7 +164,14 @@ pub fn generate(displays: &[Display], part: &Part) -> String {
         )
         .unwrap();
         writeln!(code, "  vec2 uv = (p - vec2({x:.1}, {y:.1})) / vec2({:.1}, {:.1}) * vec2(w{k}, h{k}) + vec2(u{k}, v{k});", r.w, r.h).unwrap();
-        code.push_str("  if (all(greaterThanEqual(uv, vec2(0.0))) && all(lessThan(uv, vec2(1.0)))) return source(uv);\n }\n");
+        // Only upscaled displays need the filter kernel; bilinear is enough when shrinking.
+        writeln!(
+            code,
+            "  if (all(greaterThanEqual(uv, vec2(0.0))) && all(lessThan(uv, vec2(1.0)))) return w{k} * HOOKED_size.x >= {:.1} && h{k} * HOOKED_size.y >= {:.1} ? HOOKED_tex(uv) : source(uv);\n }}",
+            r.w,
+            r.h
+        )
+        .unwrap();
     }
     code.push_str(" return vec4(0.0, 0.0, 0.0, 1.0);\n}\n");
     code

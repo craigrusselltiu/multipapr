@@ -3,6 +3,47 @@ use eframe::egui::*;
 
 const FADE_SECONDS: f32 = 0.2;
 
+/// Tooltips with roomier padding that stay clear of the window edge and of the
+/// dialog or popup holding their widget.
+pub(super) trait Hint {
+    fn hint(self, text: impl Into<WidgetText>) -> Self;
+}
+
+impl Hint for Response {
+    fn hint(self, text: impl Into<WidgetText>) -> Self {
+        const EDGE: f32 = 8.;
+        const GAP: f32 = 4.;
+        let ctx = self.ctx.clone();
+        let bounds = ctx
+            .memory(|m| m.area_rect(self.layer_id.id))
+            .unwrap_or_else(|| ctx.screen_rect())
+            .shrink(EDGE);
+        let widget = self.rect;
+        self.on_hover_ui(|ui| {
+            ui.set_max_width(ui.spacing().tooltip_width);
+            Frame::new()
+                .inner_margin(Margin::symmetric(4, 2))
+                .show(ui, |ui| ui.label(text));
+            let tip = ui.min_rect() + ui.spacing().menu_margin;
+            let mut shift = Vec2::ZERO;
+            if tip.right() > bounds.right() {
+                shift.x = bounds.right() - tip.right();
+            }
+            if tip.left() + shift.x < bounds.left() {
+                shift.x = bounds.left() - tip.left();
+            }
+            let above = widget.top() - GAP - tip.bottom();
+            if tip.bottom() > bounds.bottom()
+                && tip.top() >= widget.bottom()
+                && tip.top() + above >= bounds.top()
+            {
+                shift.y = above;
+            }
+            ctx.set_transform_layer(ui.layer_id(), emath::TSTransform::from_translation(shift));
+        })
+    }
+}
+
 pub(super) fn opacity(ctx: &Context, open: bool) -> f32 {
     ctx.animate_bool_with_time_and_easing(
         Id::new("editor popup opacity"),

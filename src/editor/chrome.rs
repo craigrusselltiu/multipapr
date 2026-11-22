@@ -1,4 +1,4 @@
-use super::{ACCENT, LINE, MUTED, PANEL, icons::Icon};
+use super::{ACCENT, LINE, MUTED, PANEL, icons::Icon, popup::Hint};
 use eframe::egui::*;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use windows_sys::Win32::{
@@ -195,7 +195,7 @@ pub fn show(
                 icon.paint(&draw, r.center(), tint);
                 *action = response.clicked();
                 if matches!(icon, Icon::Gallery | Icon::Profiles) && !open {
-                    response.on_hover_text(label);
+                    response.hint(label);
                 }
             }
             let divider = slot(6.).left();

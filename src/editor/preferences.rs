@@ -1,6 +1,6 @@
 use super::{
     ACCENT, Editor, FIELD, INK, LINE, MUTED, PANEL, gallery::Gallery, heading_font, icons::Icon,
-    popup, storage,
+    popup, popup::Hint, storage,
 };
 use crate::{
     host, process,
@@ -471,7 +471,7 @@ fn render_update_card(ui: &mut Ui, update: &UpdateState) -> UpdateAction {
                     if ui
                         .add(button)
                         .on_hover_cursor(CursorIcon::PointingHand)
-                        .on_hover_text(format!("Update to {}", release.version.display()))
+                        .hint(format!("Update to {}", release.version.display()))
                         .clicked()
                     {
                         action = UpdateAction::Install(release.clone());

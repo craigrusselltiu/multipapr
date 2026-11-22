@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## v0.3.2
+
+- Dragging a wallpaper snaps its edges to nearby display edges, and dragging a display snaps it to the wallpaper and to other displays. Hold <kbd>Shift</kbd> while dragging to place freely.
+- The editor opens centered on the main display.
+- Tooltips have more padding and keep clear of the window edge and of the dialog or popup they belong to.
+- Lower GPU use while playing. Displays that show the wallpaper at or below its native resolution skip the upscaling filter, Catmull-Rom upscaling samples nine texels instead of sixteen, and Spline36 and Lanczos compute their weights once per row and column.
+
 ## v0.3.1
 
 - Gallery uses MotionBGs and DesktopHut for animated wallpapers and Wallhaven's Hot feed for stills. Unfiltered results alternate between all three sources.

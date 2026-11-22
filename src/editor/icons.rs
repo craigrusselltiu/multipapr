@@ -1,4 +1,4 @@
-use super::{ACCENT, FIELD, MUTED};
+use super::{ACCENT, FIELD, MUTED, popup::Hint};
 use eframe::egui::*;
 
 #[derive(Clone, Copy)]
@@ -160,5 +160,5 @@ pub(super) fn info(ui: &mut Ui, help: &str) {
     ui.painter().circle_stroke(c, 6.2, pen);
     ui.painter().circle_filled(c - vec2(0., 2.5), 0.9, tint);
     ui.painter().line_segment([c, c + vec2(0., 3.)], pen);
-    response.on_hover_text(help);
+    response.hint(help);
 }

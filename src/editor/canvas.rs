@@ -1,4 +1,4 @@
-use super::{ACCENT, Editor, FIELD, INK, LINE, PANEL, TEXT, icons::Icon};
+use super::{ACCENT, Editor, FIELD, INK, LINE, PANEL, TEXT, icons::Icon, popup::Hint};
 use crate::layout::Rect as World;
 use eframe::egui::*;
 
@@ -61,6 +61,30 @@ fn hatch(draw: &Painter, r: Rect) {
     }
 }
 const GRAB: f32 = 6.;
+const SNAP: f32 = 6.;
+/// The offset that brings the nearest edge of `moving` onto an edge of `targets`
+/// within `reach`, per axis.
+fn snap(moving: World, targets: impl Iterator<Item = World>, reach: f32) -> Vec2 {
+    let mut best = vec2(reach, reach);
+    let mut offset = Vec2::ZERO;
+    for t in targets {
+        for (axis, edges, goals) in [
+            (0, [moving.x, moving.right()], [t.x, t.right()]),
+            (1, [moving.y, moving.bottom()], [t.y, t.bottom()]),
+        ] {
+            for edge in edges {
+                for goal in goals {
+                    let d = goal - edge;
+                    if d.abs() < best[axis] {
+                        best[axis] = d.abs();
+                        offset[axis] = d;
+                    }
+                }
+            }
+        }
+    }
+    offset
+}
 fn screen_rect(origin: Pos2, scale: f32, world: World) -> Rect {
     Rect::from_min_size(
         origin + vec2(world.x, world.y) * scale,
@@ -150,14 +174,14 @@ impl Editor {
                 }
                 if Icon::Plus
                     .button(ui, "Zoom in", false)
-                    .on_hover_text("Zoom in")
+                    .hint("Zoom in")
                     .clicked()
                 {
                     self.camera.zoom_by(1.25, Vec2::ZERO);
                 }
                 if Icon::Minus
                     .button(ui, "Zoom out", false)
-                    .on_hover_text("Zoom out")
+                    .hint("Zoom out")
                     .clicked()
                 {
                     self.camera.zoom_by(0.8, Vec2::ZERO);
@@ -275,7 +299,7 @@ impl Editor {
             self.last_pick = None;
             self.drag = ui
                 .input(|i| i.pointer.press_origin())
-                .map(|p| (Drag::Pan, p));
+                .map(|p| (Drag::Pan, p, Vec2::ZERO));
         } else if response.drag_started_by(PointerButton::Primary) {
             self.last_pick = None;
             if let Some(p) = ui.input(|i| i.pointer.press_origin()) {
@@ -288,33 +312,67 @@ impl Editor {
                     Drag::Wallpaper | Drag::ResizeWallpaper(_) => self.tool = Tool::Wallpaper,
                     Drag::Pan => {}
                 }
-                self.drag = Some((drag, p));
+                self.drag = Some((drag, p, Vec2::ZERO));
             }
         }
-        if let (Some((drag, last)), Some(pointer)) = (self.drag, response.interact_pointer_pos()) {
+        if let (Some((drag, last, slack)), Some(pointer)) =
+            (self.drag, response.interact_pointer_pos())
+        {
             let mut d = pointer - last;
-            self.drag = Some((drag, pointer));
+            self.drag = Some((drag, pointer, slack));
             let modifiers = ui.input(|i| i.modifiers);
+            let mut locked = None;
             if modifiers.ctrl && matches!(drag, Drag::Wallpaper | Drag::Display(_) | Drag::Pan) {
-                if modifiers.shift {
-                    d.x = 0.;
-                } else {
-                    d.y = 0.;
-                }
+                let axis = usize::from(!modifiers.shift);
+                d[axis] = 0.;
+                locked = Some(axis);
             }
             let delta = d / scale;
+            // Moves keep the unsnapped remainder in `slack` so a snap lets go once the
+            // pointer travels past it. Shift places freely.
+            let mut snapped = |moving: World, targets: Vec<World>| {
+                let mut raw = vec2(delta.x, delta.y) + slack;
+                if let Some(axis) = locked {
+                    raw[axis] = 0.;
+                }
+                let moved = World::new(moving.x + raw.x, moving.y + raw.y, moving.w, moving.h);
+                let mut offset = if modifiers.shift {
+                    Vec2::ZERO
+                } else {
+                    snap(moved, targets.into_iter(), SNAP / scale)
+                };
+                let mut rest = -offset;
+                if let Some(axis) = locked {
+                    offset[axis] = 0.;
+                    rest[axis] = slack[axis];
+                }
+                self.drag = Some((drag, pointer, rest));
+                raw + offset
+            };
+            let wallpaper_rect =
+                (has_wallpaper && full_wallpaper).then(|| layout.media(&self.settings, &wallpaper));
             match drag {
                 Drag::Pan => {
                     self.camera.offset += d;
                     ui.ctx().set_cursor_icon(CursorIcon::Grabbing);
                 }
                 Drag::Display(i) if i < layout.panels.len() && d != Vec2::ZERO => {
-                    layout.move_panel(&self.displays, &mut self.settings, i, [delta.x, delta.y]);
+                    let others = (0..layout.panels.len())
+                        .filter(|&j| j != i)
+                        .map(|j| layout.panels[j])
+                        .chain(wallpaper_rect)
+                        .collect();
+                    let step = snapped(layout.panels[i], others);
+                    layout.move_panel(&self.displays, &mut self.settings, i, [step.x, step.y]);
                 }
-                Drag::Wallpaper => {
+                Drag::Wallpaper if d != Vec2::ZERO => {
+                    let step = match wallpaper_rect {
+                        Some(r) => snapped(r, layout.panels.clone()),
+                        None => delta,
+                    };
                     let w = self.wallpaper_mut();
-                    w.center[0] += delta.x;
-                    w.center[1] += delta.y;
+                    w.center[0] += step.x;
+                    w.center[1] += step.y;
                 }
                 Drag::ResizeWallpaper(edge) if d != Vec2::ZERO => {
                     let size = media.size() / scale;
@@ -1324,5 +1382,55 @@ mod tests {
         run(&ctx, &mut editor, Modifiers::NONE, vec![middle(end, false)]);
         assert!(saved == editor.settings);
         assert_eq!(editor.camera.offset, end - start);
+    }
+
+    fn drag_through(ctx: &Context, editor: &mut Editor, modifiers: Modifiers, points: &[Pos2]) {
+        run(ctx, editor, modifiers, vec![]);
+        run(
+            ctx,
+            editor,
+            modifiers,
+            vec![Event::PointerMoved(points[0]), button(points[0], true)],
+        );
+        for &p in &points[1..] {
+            run(ctx, editor, modifiers, vec![Event::PointerMoved(p)]);
+        }
+        let last = *points.last().unwrap();
+        run(ctx, editor, modifiers, vec![button(last, false)]);
+        ctx.input_mut(|i| i.time += 1.);
+    }
+
+    #[test]
+    fn moves_snap_to_nearby_edges_unless_shift_is_held() {
+        let ctx = Context::default();
+        let mut editor = covered(&ctx);
+        editor.tool = Tool::Displays;
+        editor.selected = 1;
+        let before = editor.layout().panels[1];
+        let edge = editor.layout().panels[0].right();
+        assert_eq!(before.x, edge);
+        let b = screen(&editor, before).center();
+        let path = [b, b + vec2(30., 0.), b + vec2(3., 0.)];
+        drag_through(&ctx, &mut editor, Modifiers::NONE, &path);
+        assert_eq!(editor.layout().panels[1].x, edge);
+        drag_through(&ctx, &mut editor, Modifiers::SHIFT, &path);
+        let free = editor.layout().panels[1].x;
+        assert!(free > edge);
+        let b = screen(&editor, editor.layout().panels[1]).center();
+        drag_through(&ctx, &mut editor, Modifiers::NONE, &[b, b + vec2(30., 0.)]);
+        assert!(editor.layout().panels[1].x > free + 1.);
+
+        editor.tool = Tool::Wallpaper;
+        let l = editor.layout();
+        let media = |e: &Editor| l.media(&e.settings, &e.settings.wallpaper);
+        let start = media(&editor);
+        assert_eq!(start.x, l.panels[0].x);
+        let p = screen(&editor, l.panels[0]).center();
+        let path = [p, p + vec2(40., 0.), p + vec2(-3., 0.)];
+        drag_through(&ctx, &mut editor, Modifiers::NONE, &path);
+        let snapped = media(&editor);
+        assert!((snapped.x - start.x).abs() < 0.001 && (snapped.y - start.y).abs() < 0.001);
+        drag_through(&ctx, &mut editor, Modifiers::SHIFT, &path);
+        assert!(media(&editor).x < start.x);
     }
 }

@@ -18,6 +18,7 @@ use anyhow::Result;
 use canvas::{Camera, Drag, Tool};
 use eframe::egui::{self, *};
 use icons::Icon;
+use popup::Hint;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     io,
@@ -158,7 +159,7 @@ struct Editor {
     exit: Arc<ExitState>,
     selected: usize,
     tool: Tool,
-    drag: Option<(Drag, Pos2)>,
+    drag: Option<(Drag, Pos2, Vec2)>,
     last_pick: Option<Pos2>,
     camera: Camera,
     frame: World,
@@ -775,8 +776,7 @@ impl Editor {
                         } else {
                             "Applying wallpaper…"
                         };
-                        ui.add(Spinner::new().size(16.).color(ACCENT))
-                            .on_hover_text(hint);
+                        ui.add(Spinner::new().size(16.).color(ACCENT)).hint(hint);
                     }
                     changed
                 })
@@ -875,7 +875,7 @@ impl Editor {
             ui.add_enabled_ui(has, |ui| {
                 if ui
                     .add_sized(button_size, Button::new("Fill"))
-                    .on_hover_text("Use the wallpaper’s native size")
+                    .hint("Use the wallpaper’s native size")
                     .clicked()
                 {
                     let target = self.target(&self.layout());
@@ -889,7 +889,7 @@ impl Editor {
                 };
                 if ui
                     .add_sized(button_size, Button::new("Fit"))
-                    .on_hover_text(fit_hint)
+                    .hint(fit_hint)
                     .clicked()
                 {
                     let layout = self.layout();
@@ -906,7 +906,7 @@ impl Editor {
             ui.add_enabled_ui(has || self.importing_selected(), |ui| {
                 if ui
                     .add_sized(button_size, Button::new("Clear"))
-                    .on_hover_text(clear_hint)
+                    .hint(clear_hint)
                     .clicked()
                 {
                     self.clear_wallpaper();
@@ -1019,7 +1019,7 @@ impl Editor {
         ui.add_space(4.);
         if ui
             .button("Reset displays")
-            .on_hover_text("Restores every display’s detected size and position.")
+            .hint("Restores every display’s detected size and position.")
             .clicked()
         {
             self.settings.calibration.clear();
@@ -1670,6 +1670,7 @@ pub fn open() -> Result<()> {
             .with_min_inner_size([760., 450.])
             .with_drag_and_drop(true)
             .with_icon(icon.clone()),
+        centered: true,
         ..Default::default()
     };
     let editor_exit = Arc::clone(&exit);
