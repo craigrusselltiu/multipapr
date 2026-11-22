@@ -52,10 +52,27 @@ impl Icon {
             }
             Self::Gallery => {
                 draw.add(Shape::line(
-                    vec![point(-6., -9.), point(10., -9.), point(10., 5.)],
+                    vec![point(-5., -7.5), point(9., -7.5), point(9., 4.5)],
                     pen,
                 ));
-                Self::Picture.paint(draw, point(-1.5, 1.5), tint);
+                let front = point(-1., 1.5);
+                draw.rect_stroke(
+                    Rect::from_center_size(front, vec2(16., 12.)),
+                    2,
+                    pen,
+                    StrokeKind::Inside,
+                );
+                draw.circle_filled(front + vec2(3.5, -2.5), 1.1, tint);
+                draw.add(Shape::line(
+                    vec![
+                        front + vec2(-7., 4.5),
+                        front + vec2(-2., -0.5),
+                        front + vec2(2.5, 4.),
+                        front + vec2(5., 1.5),
+                        front + vec2(7., 3.5),
+                    ],
+                    pen,
+                ));
             }
             Self::Picture => {
                 draw.rect_stroke(

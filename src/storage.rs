@@ -211,6 +211,7 @@ fn save_in<T: serde::Serialize>(dir: &Path, name: &str, value: &T) -> Result<()>
 pub struct Preferences {
     pub close_to_tray: bool,
     pub maintain_ratio: bool,
+    pub windows_background: bool,
     pub fullscreen: PlaybackAction,
     pub battery_saver: PlaybackAction,
 }
@@ -227,6 +228,7 @@ impl Default for Preferences {
         Self {
             close_to_tray: true,
             maintain_ratio: true,
+            windows_background: false,
             fullscreen: PlaybackAction::Continue,
             battery_saver: PlaybackAction::Continue,
         }
@@ -569,12 +571,15 @@ mod tests {
         let path = dir.path().join("preferences.json");
         assert_eq!(load_preferences_from(&path), Preferences::default());
         assert!(load_preferences_from(&path).close_to_tray);
+        assert!(!load_preferences_from(&path).windows_background);
 
         fs::write(&path, r#"{"close_to_tray":false}"#).unwrap();
         let mut previous = load_preferences_from(&path);
         assert!(!previous.close_to_tray);
+        assert!(!previous.windows_background);
         assert_eq!(previous.fullscreen, PlaybackAction::Continue);
         assert_eq!(previous.battery_saver, PlaybackAction::Continue);
+        previous.windows_background = true;
         previous.fullscreen = PlaybackAction::Stop;
         previous.battery_saver = PlaybackAction::Pause;
         save_in(dir.path(), "preferences.json", &previous).unwrap();
@@ -582,5 +587,6 @@ mod tests {
 
         fs::write(&path, r#"{}"#).unwrap();
         assert!(load_preferences_from(&path).close_to_tray);
+        assert!(!load_preferences_from(&path).windows_background);
     }
 }

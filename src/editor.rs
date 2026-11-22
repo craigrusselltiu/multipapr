@@ -400,6 +400,33 @@ impl Editor {
             job.targets.retain(|(previous, _)| previous != target);
         }
     }
+    fn is_animated_wallpaper(&self, path: &Path) -> bool {
+        if path.as_os_str().is_empty() {
+            return false;
+        }
+        if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+            if ext.eq_ignore_ascii_case("mp4")
+                || ext.eq_ignore_ascii_case("m4v")
+                || ext.eq_ignore_ascii_case("mov")
+                || ext.eq_ignore_ascii_case("mkv")
+                || ext.eq_ignore_ascii_case("webm")
+                || ext.eq_ignore_ascii_case("ogv")
+                || ext.eq_ignore_ascii_case("gif")
+            {
+                return true;
+            }
+            if ext.eq_ignore_ascii_case("png")
+                || ext.eq_ignore_ascii_case("jpg")
+                || ext.eq_ignore_ascii_case("jpeg")
+                || ext.eq_ignore_ascii_case("webp")
+                || ext.eq_ignore_ascii_case("bmp")
+                || ext.eq_ignore_ascii_case("ico")
+            {
+                return false;
+            }
+        }
+        self.gallery.is_saved_animated(path).unwrap_or(false)
+    }
     fn clear_wallpaper(&mut self) {
         self.cancel_import(&self.import_target());
         if !self.wallpaper().is_empty() {
@@ -569,6 +596,7 @@ impl Editor {
                             None => (&mut self.settings.wallpaper, layout.bounds),
                         };
                         w.media = media.clone();
+                        w.paused = false;
                         w.cover(pitch, frame);
                     }
                     layout.freeze(&self.displays, &mut self.settings);
@@ -740,7 +768,7 @@ impl Editor {
     fn workspace(&mut self, ctx: &Context) {
         SidePanel::right("inspector")
             .resizable(true)
-            .default_width(286.)
+            .default_width(chrome::SIDEBAR_WIDTH)
             .width_range(260.0..=520.0)
             .frame(Frame::new().fill(PANEL).inner_margin(Margin {
                 left: INSPECTOR_PADDING,
@@ -824,12 +852,32 @@ impl Editor {
             });
     }
     fn file_field(&mut self, ui: &mut Ui) {
+        let can_clear = !self.wallpaper().is_empty() || self.importing_selected();
         let (rect, response) =
             ui.allocate_exact_size(vec2(ui.available_width(), 36.), Sense::click());
         let response = response.on_hover_cursor(CursorIcon::PointingHand);
         response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, "Choose file"));
+        let folder = pos2(rect.right() - 20., rect.center().y);
+        let clear_rect =
+            Rect::from_center_size(pos2(folder.x - 26., rect.center().y), Vec2::splat(24.));
+        let clear = can_clear.then(|| {
+            let clear_hint = if self.settings.multi {
+                "Clear this display’s wallpaper"
+            } else {
+                "Clear the spanning wallpaper"
+            };
+            let resp = ui
+                .interact(clear_rect, response.id.with("clear"), Sense::click())
+                .on_hover_cursor(CursorIcon::PointingHand);
+            resp.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, "Clear wallpaper"));
+            resp.hint(clear_hint)
+        });
+        let over_clear = clear
+            .as_ref()
+            .is_some_and(|resp| resp.hovered() || resp.has_focus());
+        let over_field = response.hovered() && !over_clear;
         let draw = ui.painter();
-        draw.rect_filled(rect, 6, if response.hovered() { HOVER } else { FIELD });
+        draw.rect_filled(rect, 6, if over_field { HOVER } else { FIELD });
         if response.has_focus() {
             draw.rect_stroke(rect, 6, Stroke::new(1.0_f32, ACCENT), StrokeKind::Inside);
         }
@@ -839,11 +887,15 @@ impl Editor {
             Some(name) => (name.to_string_lossy().into_owned(), TEXT),
             None => ("Choose a file…".to_owned(), MUTED),
         };
-        let icon = pos2(rect.right() - 20., rect.center().y);
         let left = rect.left() + 12.;
+        let text_right = if can_clear {
+            clear_rect.left() - 6.
+        } else {
+            folder.x - 16.
+        };
         let mut job = text::LayoutJob::simple_singleline(text, FontId::proportional(13.5), color);
         job.wrap = text::TextWrapping {
-            max_width: icon.x - 16. - left,
+            max_width: (text_right - left).max(1.),
             max_rows: 1,
             break_anywhere: true,
             overflow_character: Some('…'),
@@ -854,8 +906,24 @@ impl Editor {
             galley,
             color,
         );
-        Icon::Folder.paint(draw, icon, if response.hovered() { TEXT } else { MUTED });
-        if response.clicked() {
+        if let Some(clear_resp) = &clear {
+            if over_clear {
+                draw.rect_filled(clear_rect, 5, HOVER);
+            }
+            if clear_resp.has_focus() {
+                draw.rect_stroke(
+                    clear_rect,
+                    5,
+                    Stroke::new(1.0_f32, ACCENT),
+                    StrokeKind::Inside,
+                );
+            }
+            Icon::Close.paint(draw, clear_rect.center(), if over_clear { TEXT } else { MUTED });
+        }
+        Icon::Folder.paint(draw, folder, if over_field { TEXT } else { MUTED });
+        if clear.is_some_and(|resp| resp.clicked()) {
+            self.clear_wallpaper();
+        } else if response.clicked() {
             self.pick(ui.ctx());
         }
     }
@@ -867,12 +935,29 @@ impl Editor {
         section_heading(ui, "Wallpaper", detail);
         self.file_field(ui);
         let has = !self.wallpaper().is_empty();
+        let animated = has && self.is_animated_wallpaper(&self.wallpaper().media.path);
         ui.horizontal(|ui| {
+            let count = if animated { 3. } else { 2. };
             let button_size = vec2(
-                (ui.available_width() - 2. * ui.spacing().item_spacing.x) / 3.,
+                (ui.available_width() - (count - 1.) * ui.spacing().item_spacing.x) / count,
                 30.,
             );
             ui.add_enabled_ui(has, |ui| {
+                if animated {
+                    let paused = self.wallpaper().paused;
+                    let (label, hint) = if paused {
+                        ("Play", "Resume animated wallpaper")
+                    } else {
+                        ("Pause", "Stop animation and display the first frame")
+                    };
+                    if ui
+                        .add_sized(button_size, Button::new(label))
+                        .hint(hint)
+                        .clicked()
+                    {
+                        self.wallpaper_mut().paused = !paused;
+                    }
+                }
                 if ui
                     .add_sized(button_size, Button::new("Fill"))
                     .hint("Use the wallpaper’s native size")
@@ -896,20 +981,6 @@ impl Editor {
                     let (pitch, target) = (layout.pitch(&self.settings), self.target(&layout));
                     self.wallpaper_mut().cover(pitch, target);
                     self.reframe();
-                }
-            });
-            let clear_hint = if self.settings.multi {
-                "Clear this display’s wallpaper"
-            } else {
-                "Clear the spanning wallpaper"
-            };
-            ui.add_enabled_ui(has || self.importing_selected(), |ui| {
-                if ui
-                    .add_sized(button_size, Button::new("Clear"))
-                    .hint(clear_hint)
-                    .clicked()
-                {
-                    self.clear_wallpaper();
                 }
             });
         });
@@ -1028,35 +1099,6 @@ impl Editor {
         }
     }
     fn advanced(&mut self, ui: &mut Ui) {
-        let id = &self.displays[self.selected].id;
-        let assigned = &self.settings.shown(id).media.path;
-        let state = if assigned.as_os_str().is_empty() {
-            "No wallpaper assigned"
-        } else {
-            self.playback
-                .as_ref()
-                .and_then(|report| report.displays.get(id))
-                .filter(|(file, _)| file == assigned)
-                .map_or("Waiting for playback status…", |(_, state)| {
-                    state.as_str()
-                })
-        };
-        ui.label(
-            RichText::new(format!("Playback · {state}"))
-                .small()
-                .color(MUTED),
-        );
-        if !assigned.as_os_str().is_empty() {
-            ui.add(
-                Label::new(
-                    RichText::new(assigned.to_string_lossy())
-                        .small()
-                        .color(MUTED),
-                )
-                .wrap(),
-            );
-        }
-        ui.separator();
         let i = self.selected;
         let d = &self.displays[i];
         let l = self.layout();
@@ -1373,6 +1415,7 @@ impl Editor {
         self.settings = settings;
         if let Some(i) = self.active_profile() {
             self.profiles[i].media = self.settings.wallpaper.media.clone();
+            self.profiles[i].paused = self.settings.wallpaper.paused;
             self.profiles[i].framings = step.framings;
             self.profiles_dirty = true;
         }
@@ -1400,6 +1443,9 @@ impl Editor {
                     let layout = self.layout();
                     let mut delivered = true;
                     for part in &plan {
+                        if part.paused {
+                            continue;
+                        }
                         let parameters =
                             shader::parameters(&layout, &self.settings, &self.displays, part);
                         delivered &= host::update_mapping(
@@ -1666,7 +1712,7 @@ pub fn open() -> Result<()> {
     let options = eframe::NativeOptions {
         viewport: ViewportBuilder::default()
             .with_decorations(false)
-            .with_inner_size([1080., 680.])
+            .with_inner_size([1160., 760.])
             .with_min_inner_size([760., 450.])
             .with_drag_and_drop(true)
             .with_icon(icon.clone()),

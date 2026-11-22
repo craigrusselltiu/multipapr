@@ -2,6 +2,14 @@
 
 All notable changes to this project are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## v0.3.3
+
+- Added **Pause** / **Play** beside **Fill** and **Fit** for animated wallpapers. Pausing stops the video player and displays the first frame as a static wallpaper with no GPU use.
+- Added **Set Windows background** in **Settings → General** (off by default) to mirror each display’s wallpaper—or first frame for animated wallpapers—to Windows’ underlying desktop background, replacing files in place.
+- Moved wallpaper clearing to an inline **×** button inside the file picker box, and removed the Playback status section from **Advanced**.
+- Gallery search now runs automatically one second after typing stops.
+- Increased the default editor window size (`1160 × 760`), aligned the default sidebar width with the title-bar divider, evened out the padding around the divider, and kept Settings subtext single-line with roomier vertical padding.
+
 ## v0.3.2
 
 - Dragging a wallpaper snaps its edges to nearby display edges, and dragging a display snaps it to the wallpaper and to other displays. Hold <kbd>Shift</kbd> while dragging to place freely.

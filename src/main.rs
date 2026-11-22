@@ -7,10 +7,12 @@ mod host;
 mod http;
 mod layout;
 mod process;
+mod render;
 mod shader;
 mod storage;
 mod tray;
 mod update;
+mod windows_bg;
 
 use anyhow::{Context, Result};
 use std::{env, path::Path};

@@ -23,6 +23,7 @@ const GAP: f32 = 12.;
 const MORE_PAGES_PER_SOURCE: u8 = 2;
 const REVEAL_ROWS: f32 = 3.;
 const PREVIEW_DELAY: f64 = 0.65;
+const SEARCH_DELAY: f64 = 1.0;
 const CARD_FADE: f64 = 0.18;
 const FILTER_WIDTH: f32 = 246.;
 const FILTER_PADDING: Margin = Margin::symmetric(16, 13);
@@ -495,6 +496,7 @@ enum Batch {
 pub(super) struct Gallery {
     searches: Vec<RemoteSearch>,
     draft: String,
+    search_at: Option<f64>,
     criteria: Criteria,
     generation: u64,
     batch: Option<Batch>,
@@ -521,6 +523,7 @@ impl Default for Gallery {
                 RemoteSearch::new(SearchCursor::Wallhaven(1)),
             ],
             draft: String::new(),
+            search_at: None,
             criteria: Criteria::default(),
             generation: 0,
             batch: None,
@@ -574,6 +577,14 @@ impl Gallery {
 
     pub(super) fn bytes(&self) -> u64 {
         self.saved.bytes
+    }
+
+    pub(super) fn is_saved_animated(&self, path: &std::path::Path) -> Option<bool> {
+        self.saved
+            .items
+            .iter()
+            .find(|item| item.media.path == path)
+            .map(|item| item.animated)
     }
 
     pub(super) fn scanning(&self) -> bool {
@@ -687,6 +698,7 @@ impl Gallery {
 
     fn close(&mut self, ctx: &Context) -> Action {
         self.span_apply = None;
+        self.search_at = None;
         self.stop_browsing();
         ctx.memory_mut(|memory| {
             if memory.is_popup_open(Id::new(FILTERS_POPUP)) {
@@ -708,6 +720,7 @@ impl Gallery {
             self.refresh_saved(ctx);
             self.hovered = None;
             self.span_apply = None;
+            self.search_at = None;
             self.thumbnails.loaded.retain(|(_, image)| image.is_some());
             self.thumbnails
                 .animated
@@ -781,19 +794,42 @@ impl Gallery {
         let filtered = criteria.media != MediaFilter::All
             || criteria.resolution != Resolution::Any
             || downloaded;
-        let (submit, filter, close) = popup::header(ui, "Gallery", |ui| {
+        let ((submit, changed), filter, close) = popup::header(ui, "Gallery", |ui| {
             let room = ui.available_width() - 2. * (32. + ui.spacing().item_spacing.x);
             let width = room.min(420.);
             ui.add_space((room - width).max(0.));
-            let submit = self.search_field(ui, opening, width);
+            let search = self.search_field(ui, opening, width);
             let filter = Icon::Filter
                 .button(ui, "Filter wallpapers", open || filtered)
                 .hint("Filter wallpapers");
             let close = Icon::Close.button(ui, "Close gallery", false).clicked();
-            (submit, filter, close)
+            (search, filter, close)
         });
         filters(ui, bounds, &filter, &mut criteria, &mut downloaded);
-        if submit || criteria != self.criteria || downloaded != self.downloaded {
+        let now = ui.input(|i| i.time);
+        if changed {
+            let pending = gallery::search_text(&self.draft);
+            if self.draft.trim().is_empty() || pending == self.criteria.text {
+                self.search_at = None;
+            } else {
+                self.search_at = Some(now + SEARCH_DELAY);
+            }
+        }
+        let auto_submit = if let Some(at) = self.search_at {
+            let remaining = at - now;
+            if remaining > 0. {
+                ui.ctx()
+                    .request_repaint_after(Duration::from_secs_f64(remaining));
+                false
+            } else {
+                self.search_at = None;
+                true
+            }
+        } else {
+            false
+        };
+        if submit || auto_submit || criteria != self.criteria || downloaded != self.downloaded {
+            self.search_at = None;
             criteria.text = gallery::search_text(&self.draft);
             if criteria != self.criteria
                 || downloaded != self.downloaded
@@ -806,13 +842,14 @@ impl Gallery {
                 self.start_search(criteria);
             }
         } else if self.draft.trim().is_empty() && !self.criteria.text.is_empty() {
+            self.search_at = None;
             criteria.text.clear();
             self.start_search(criteria);
         }
         close
     }
 
-    fn search_field(&mut self, ui: &mut Ui, opening: bool, width: f32) -> bool {
+    fn search_field(&mut self, ui: &mut Ui, opening: bool, width: f32) -> (bool, bool) {
         Frame::new()
             .fill(INK)
             .stroke(Stroke::new(1.0_f32, LINE))
@@ -833,11 +870,12 @@ impl Gallery {
                     field.widget_info(|| {
                         WidgetInfo::labeled(WidgetType::TextEdit, true, "Search wallpapers")
                     });
+                    let changed = field.changed();
                     let enter = field.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
                     if opening || enter {
                         field.request_focus();
                     }
-                    Icon::Search.button(ui, "Search", false).clicked() || enter
+                    (Icon::Search.button(ui, "Search", false).clicked() || enter, changed)
                 })
                 .inner
             })
@@ -2103,5 +2141,55 @@ mod tests {
         assert!(popup.searches.iter().all(|search| search.pages_left == 1));
         assert!(popup.thumbnails.browsing.is_none());
         assert!(popup.searches.iter().all(|search| search.request.is_none()));
+    }
+
+    #[test]
+    fn typing_auto_searches_after_one_second_and_resets_on_more_input() {
+        let ctx = Context::default();
+        super::super::set_fonts(&ctx);
+        let (_local_scan, scan) = channel();
+        let mut popup = Gallery {
+            generation: 1,
+            scan: Some((0, scan)),
+            ..Default::default()
+        };
+        let screen = Rect::from_min_size(Pos2::ZERO, vec2(760., 450.));
+        let run = |popup: &mut Gallery, time, events, opening| {
+            let _ = ctx.run(
+                RawInput {
+                    screen_rect: Some(screen),
+                    time: Some(time),
+                    events,
+                    ..Default::default()
+                },
+                |ctx| {
+                    popup.show(
+                        ctx,
+                        opening,
+                        1.,
+                        View {
+                            displays: &[],
+                            selected: 0,
+                            multi: false,
+                            downloading: &HashSet::new(),
+                            importing_local: false,
+                        },
+                    );
+                },
+            );
+        };
+        run(&mut popup, 0.0, Vec::new(), true);
+        popup.stop_browsing();
+        run(&mut popup, 1.0, vec![Event::Text("cat".into())], false);
+        assert_eq!(popup.criteria.text, "");
+        run(&mut popup, 1.8, Vec::new(), false);
+        assert_eq!(popup.criteria.text, "");
+        // Typing more pushes the 1s debounce timer forward.
+        run(&mut popup, 1.8, vec![Event::Text("s".into())], false);
+        run(&mut popup, 2.5, Vec::new(), false);
+        assert_eq!(popup.criteria.text, "");
+        run(&mut popup, 2.8, Vec::new(), false);
+        assert_eq!(popup.criteria.text, "cats");
+        assert!(popup.search_at.is_none());
     }
 }

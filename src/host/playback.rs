@@ -40,6 +40,9 @@ impl PlaybackPolicy {
             },
         }
     }
+    pub(super) fn is_locked(&self) -> bool {
+        self.locked
+    }
     fn stopped(&self) -> Option<&'static str> {
         if self.battery == PlaybackAction::Stop {
             Some("Stopped · Energy Saver")
@@ -120,6 +123,7 @@ impl Players {
                 .map(|(index, _)| Part {
                     media: PathBuf::new(),
                     displays: vec![index],
+                    paused: false,
                 }),
         );
         let desired: Vec<_> = plan
@@ -142,8 +146,8 @@ impl Players {
                 .find(|p| &p.pipe == pipe);
             if let Some(p) = player {
                 p.part.clone_from(part);
-                if mapping_changed && p.playback.is_some() {
-                    p.pending_mapping = Some(shader::parameters(&layout, settings, displays, part));
+                if mapping_changed {
+                    p.update_mapping_for(&layout, settings, displays, part);
                 }
             } else if self
                 .failures
@@ -189,7 +193,9 @@ impl Players {
             let status = if let Some((_, msg)) = self.failures.get(pipe) {
                 msg.as_str()
             } else if let Some(p) = self.visible.iter().find(|p| &p.pipe == pipe) {
-                if p.still == Some(true) {
+                if p.part.paused {
+                    "Paused"
+                } else if p.still == Some(true) {
                     "Still image"
                 } else if p.covered {
                     policy.paused(p.desktop).unwrap_or("Paused")
@@ -211,7 +217,18 @@ impl Players {
         Ok(report)
     }
 
+    pub(super) fn maintain_surfaces(&mut self) {
+        for p in &self.visible {
+            let _ = p.surface.maintain(p.desktop);
+        }
+    }
+
     pub(super) fn advance(&mut self) -> Result<()> {
+        for p in &mut self.visible {
+            if p.has_pending_render() {
+                let _ = p.check();
+            }
+        }
         if self.loading.is_empty() && self.visible.iter().all(|p| self.desired.contains(&p.pipe)) {
             self.fade = None;
             return Ok(());
@@ -238,7 +255,7 @@ impl Players {
         let only_black = self
             .fade
             .map_or(waiting && !self.failures.is_empty(), |(_, black)| black);
-        let transitioning = |player: &Player| !only_black || player.playback.is_none();
+        let transitioning = |player: &Player| !only_black || player.is_black();
         if (waiting && !only_black) || (only_black && !self.loading.iter().any(transitioning)) {
             self.cancel_fade();
             return Ok(());
@@ -280,7 +297,7 @@ impl Players {
         Ok(())
     }
     pub(super) fn is_loading(&self) -> bool {
-        self.loading.iter().any(|p| p.playback.is_none())
+        self.loading.iter().any(Player::is_black)
             || self.failures.is_empty()
                 && (!self.loading.is_empty()
                     || self.visible.iter().any(|p| !self.desired.contains(&p.pipe)))
@@ -289,7 +306,9 @@ impl Players {
     pub(super) fn interval(&self) -> u128 {
         if self.fade.is_some() {
             16
-        } else if self.loading.iter().any(|p| p.still.is_none()) {
+        } else if self.loading.iter().any(|p| p.still.is_none())
+            || self.visible.iter().any(Player::has_pending_render)
+        {
             50
         } else {
             1000

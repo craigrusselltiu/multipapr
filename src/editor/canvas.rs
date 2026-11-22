@@ -777,8 +777,8 @@ mod tests {
     #[test]
     fn workspace_keeps_zoom_controls_in_the_corner_and_inspector_values_visible() {
         for (size, multi) in [
-            (vec2(1080., 680.), false),
-            (vec2(1080., 680.), true),
+            (vec2(1160., 760.), false),
+            (vec2(1160., 760.), true),
             (vec2(760., 450.), true),
         ] {
             let ctx = Context::default();
@@ -808,7 +808,7 @@ mod tests {
             frame();
             frame();
             let output = frame();
-            if size.y == 680. {
+            if size.y == 760. {
                 let heading_y = |label| {
                     output
                         .shapes
@@ -821,6 +821,36 @@ mod tests {
                 };
                 assert!(heading_y("Advanced") > heading_y("Wallpaper").max(heading_y("Displays")));
             }
+            let title_divider_x = output
+                .shapes
+                .iter()
+                .find_map(|shape| match &shape.shape {
+                    Shape::LineSegment { points, .. }
+                        if (points[0].x - points[1].x).abs() < 0.01
+                            && (points[1].y - points[0].y - 20.).abs() < 0.5 =>
+                    {
+                        Some(points[0].x)
+                    }
+                    _ => None,
+                })
+                .expect("title bar divider");
+            let sidebar_line_x = output
+                .shapes
+                .iter()
+                .find_map(|shape| match &shape.shape {
+                    Shape::LineSegment { points, .. }
+                        if (points[0].x - points[1].x).abs() < 0.01
+                            && points[1].y - points[0].y > 300. =>
+                    {
+                        Some(points[0].x)
+                    }
+                    _ => None,
+                })
+                .expect("sidebar separator");
+            assert!(
+                (title_divider_x - sidebar_line_x).abs() < 0.01,
+                "title bar divider ({title_divider_x}) != sidebar separator ({sidebar_line_x})"
+            );
             let canvas = ctx.available_rect();
             let toolbar = output
                 .shapes
@@ -1432,5 +1462,103 @@ mod tests {
         assert!((snapped.x - start.x).abs() < 0.001 && (snapped.y - start.y).abs() < 0.001);
         drag_through(&ctx, &mut editor, Modifiers::SHIFT, &path);
         assert!(media(&editor).x < start.x);
+    }
+
+    #[test]
+    fn sidebar_has_inline_clear_icon_pause_play_for_mp4_and_no_advanced_playback_status() {
+        let ctx = Context::default();
+        let mut editor = covered(&ctx);
+        let size = vec2(1160., 760.);
+        let run_workspace = |editor: &mut Editor, events| {
+            ctx.run(
+                RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, size)),
+                    events,
+                    ..Default::default()
+                },
+                |ctx| editor.workspace(ctx),
+            )
+        };
+        let texts = |out: &FullOutput| -> Vec<(String, Rect)> {
+            out.shapes
+                .iter()
+                .filter_map(|s| match &s.shape {
+                    Shape::Text(t) => Some((t.galley.text().to_owned(), t.visual_bounding_rect())),
+                    _ => None,
+                })
+                .collect()
+        };
+
+        // Still wallpaper: Fill & Fit only, no Clear button, no Pause/Play button.
+        let out = run_workspace(&mut editor, vec![]);
+        let items = texts(&out);
+        assert!(items.iter().any(|(t, _)| t == "Fill"));
+        assert!(items.iter().any(|(t, _)| t == "Fit"));
+        assert!(!items.iter().any(|(t, _)| t == "Clear"));
+        assert!(!items.iter().any(|(t, _)| t == "Pause" || t == "Play"));
+
+        // Switch to MP4: [Pause] [Fill] [Fit] in order.
+        editor.settings.wallpaper.media.path = "chainsawman.mp4".into();
+        let out = run_workspace(&mut editor, vec![]);
+        let items = texts(&out);
+        let pause_rect = items.iter().find(|(t, _)| t == "Pause").unwrap().1;
+        let fill_rect = items.iter().find(|(t, _)| t == "Fill").unwrap().1;
+        let fit_rect = items.iter().find(|(t, _)| t == "Fit").unwrap().1;
+        assert!(pause_rect.right() < fill_rect.left());
+        assert!(fill_rect.right() < fit_rect.left());
+
+        // Click Pause -> toggles paused state and changes label to Play.
+        let p = pause_rect.center();
+        run_workspace(&mut editor, vec![Event::PointerMoved(p), button(p, true)]);
+        run_workspace(&mut editor, vec![button(p, false)]);
+        assert!(editor.settings.wallpaper.paused);
+        let out = run_workspace(&mut editor, vec![]);
+        assert!(texts(&out).iter().any(|(t, _)| t == "Play"));
+
+        // Expand Advanced and confirm Playback status & path are removed.
+        let adv = texts(&out)
+            .into_iter()
+            .find(|(t, _)| t == "Advanced")
+            .unwrap()
+            .1
+            .center();
+        run_workspace(&mut editor, vec![Event::PointerMoved(adv), button(adv, true)]);
+        run_workspace(&mut editor, vec![button(adv, false)]);
+        let out = run_workspace(&mut editor, vec![]);
+        let adv_texts = texts(&out);
+        assert!(adv_texts.iter().any(|(t, _)| t == "Maintain ratio"));
+        assert!(!adv_texts.iter().any(|(t, _)| t.starts_with("Playback")));
+
+        // Click the inline X clear icon inside the file box (left of folder icon).
+        let file_y = adv_texts
+            .iter()
+            .find(|(t, _)| t == "chainsawman.mp4")
+            .unwrap()
+            .1
+            .center()
+            .y;
+        let x_pos = out
+            .shapes
+            .iter()
+            .find_map(|s| match &s.shape {
+                Shape::LineSegment { points, .. }
+                    if (points[0].y - file_y).abs() < 8.
+                        && (points[1].x - points[0].x - 9.).abs() < 0.2
+                        && (points[1].y - points[0].y - 9.).abs() < 0.2 =>
+                {
+                    Some(pos2(
+                        (points[0].x + points[1].x) * 0.5,
+                        (points[0].y + points[1].y) * 0.5,
+                    ))
+                }
+                _ => None,
+            })
+            .expect("inline clear X icon in file box");
+        run_workspace(
+            &mut editor,
+            vec![Event::PointerMoved(x_pos), button(x_pos, true)],
+        );
+        run_workspace(&mut editor, vec![button(x_pos, false)]);
+        assert!(editor.settings.wallpaper.is_empty());
     }
 }

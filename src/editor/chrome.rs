@@ -10,7 +10,12 @@ use windows_sys::Win32::{
 const HEIGHT: f32 = 46.;
 const CONTROL_WIDTH: f32 = 46.;
 const CONTROLS: f32 = 8.;
+const DIVIDER_WIDTH: f32 = 11.;
 const GALLERY: &str = "Gallery";
+
+/// Default right-sidebar width so its left separator aligns pixel-for-pixel with
+/// the title-bar divider between Redo and Gallery.
+pub const SIDEBAR_WIDTH: f32 = 6. * CONTROL_WIDTH + (DIVIDER_WIDTH + 1.) / 2.;
 
 pub struct Actions {
     pub settings: bool,
@@ -82,7 +87,7 @@ unsafe extern "system" fn window_proc(
                 }
             }
             if pt.y < (HEIGHT * dpi) as i32
-                && pt.x < client.right - (CONTROLS * CONTROL_WIDTH * dpi) as i32
+                && pt.x < client.right - ((CONTROLS * CONTROL_WIDTH + DIVIDER_WIDTH) * dpi) as i32
             {
                 return HTCAPTION as isize;
             }
@@ -148,8 +153,9 @@ pub fn show(
                 Stroke::new(1.0_f32, LINE),
             );
             let slot = |n: f32| {
+                let offset = if n > 6. { DIVIDER_WIDTH } else { 0. };
                 Rect::from_min_size(
-                    pos2(area.right() - n * CONTROL_WIDTH, area.top()),
+                    pos2(area.right() - n * CONTROL_WIDTH - offset, area.top()),
                     vec2(CONTROL_WIDTH, HEIGHT),
                 )
             };
@@ -198,7 +204,7 @@ pub fn show(
                     response.hint(label);
                 }
             }
-            let divider = slot(6.).left();
+            let divider = slot(6.).left() - DIVIDER_WIDTH / 2.;
             draw.vline(
                 divider,
                 Rangef::new(area.center().y - 10., area.center().y + 10.),
@@ -329,5 +335,48 @@ mod tests {
                     .contains(&expected)
             );
         }
+    }
+
+    #[test]
+    fn title_bar_divider_has_even_padding_matching_button_gaps() {
+        let ctx = Context::default();
+        super::super::set_fonts(&ctx);
+        let output = ctx.run(
+            RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(900., 600.))),
+                ..Default::default()
+            },
+            |ctx| {
+                show(ctx, TextureId::default(), true, true, true, false, true);
+            },
+        );
+        let divider_x = output
+            .shapes
+            .iter()
+            .find_map(|s| match &s.shape {
+                Shape::LineSegment { points, .. }
+                    if (points[0].x - points[1].x).abs() < 0.01
+                        && (points[1].y - points[0].y - 20.).abs() < 0.5 =>
+                {
+                    Some(points[0].x)
+                }
+                _ => None,
+            })
+            .expect("title bar divider");
+        let gallery_hover = output
+            .shapes
+            .iter()
+            .find_map(|s| match &s.shape {
+                Shape::Rect(r) if r.fill == LINE && r.corner_radius == CornerRadius::same(7) => {
+                    Some(r.rect)
+                }
+                _ => None,
+            })
+            .expect("open gallery highlight");
+        let redo_right = 900. - 6. * CONTROL_WIDTH - DIVIDER_WIDTH - 5.;
+        let left_pad = divider_x - redo_right;
+        let right_pad = gallery_hover.left() - divider_x;
+        assert!((left_pad - right_pad).abs() < 0.01, "{left_pad} vs {right_pad}");
+        assert!((left_pad - 10.5).abs() < 0.01, "expected consistent padding around divider, got {left_pad}");
     }
 }

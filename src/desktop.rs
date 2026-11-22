@@ -3,7 +3,11 @@ use anyhow::{Context, Result, ensure};
 use std::ptr::{null, null_mut};
 use windows_sys::Win32::{
     Foundation::*,
-    Graphics::Gdi::{BLACK_BRUSH, GetStockObject},
+    Graphics::Gdi::{
+        BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BLACK_BRUSH, BitBlt, BeginPaint, CreateCompatibleDC,
+        CreateDIBSection, DIB_RGB_COLORS, DeleteDC, DeleteObject, EndPaint, GetStockObject,
+        HBITMAP, InvalidateRect, PAINTSTRUCT, SRCCOPY, SelectObject, UpdateWindow,
+    },
     System::{LibraryLoader::GetModuleHandleW, StationsAndDesktops::*},
     UI::WindowsAndMessaging::*,
 };
@@ -38,12 +42,21 @@ unsafe fn wallpaper_layer(prog: HWND) -> Option<(HWND, HWND)> {
         None
     }
 }
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum SurfaceKind {
+    Video,
+    Black,
+    Still,
+}
+
 pub struct Surface {
     pub hwnd: HWND,
     parent: HWND,
+    bitmap: HBITMAP,
 }
 
 const BLACK_SURFACE_CLASS: &str = "Multipapr Black Wallpaper";
+const STILL_SURFACE_CLASS: &str = "Multipapr Still Wallpaper";
 
 fn register_black_surface(instance: HINSTANCE, class: &[u16]) -> Result<()> {
     unsafe {
@@ -63,18 +76,81 @@ fn register_black_surface(instance: HINSTANCE, class: &[u16]) -> Result<()> {
     Ok(())
 }
 
+unsafe extern "system" fn still_window_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    unsafe {
+        if msg == WM_ERASEBKGND {
+            return 1;
+        }
+        if msg == WM_PAINT {
+            let mut ps: PAINTSTRUCT = std::mem::zeroed();
+            let hdc = BeginPaint(hwnd, &mut ps);
+            if !hdc.is_null() {
+                let bmp = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as HBITMAP;
+                if !bmp.is_null() {
+                    let mem = CreateCompatibleDC(hdc);
+                    if !mem.is_null() {
+                        let prev = SelectObject(mem, bmp);
+                        let r = ps.rcPaint;
+                        BitBlt(
+                            hdc,
+                            r.left,
+                            r.top,
+                            r.right - r.left,
+                            r.bottom - r.top,
+                            mem,
+                            r.left,
+                            r.top,
+                            SRCCOPY,
+                        );
+                        SelectObject(mem, prev);
+                        DeleteDC(mem);
+                    }
+                }
+            }
+            EndPaint(hwnd, &ps);
+            return 0;
+        }
+        DefWindowProcW(hwnd, msg, wparam, lparam)
+    }
+}
+
+fn register_still_surface(instance: HINSTANCE, class: &[u16]) -> Result<()> {
+    unsafe {
+        let window = WNDCLASSW {
+            lpfnWndProc: Some(still_window_proc),
+            hInstance: instance,
+            hbrBackground: GetStockObject(BLACK_BRUSH),
+            lpszClassName: class.as_ptr(),
+            ..std::mem::zeroed()
+        };
+        ensure!(
+            RegisterClassW(&window) != 0 || GetLastError() == ERROR_CLASS_ALREADY_EXISTS,
+            "Cannot register static wallpaper surface: {}",
+            std::io::Error::last_os_error()
+        );
+    }
+    Ok(())
+}
+
 impl Surface {
-    pub fn create(r: Rect, black: bool) -> Result<Self> {
+    pub fn create(r: Rect, kind: SurfaceKind) -> Result<Self> {
         unsafe {
             let prog = find(null_mut(), null_mut(), "Progman");
             ensure!(!prog.is_null(), "Waiting for Windows Explorer");
             let mut layer = wallpaper_layer(prog);
             let title = wide("Multipapr Wallpaper");
             if layer.is_none_or(|(parent, _)| {
-                ["STATIC", BLACK_SURFACE_CLASS].into_iter().all(|class| {
-                    FindWindowExW(parent, null_mut(), wide(class).as_ptr(), title.as_ptr())
-                        .is_null()
-                })
+                ["STATIC", BLACK_SURFACE_CLASS, STILL_SURFACE_CLASS]
+                    .into_iter()
+                    .all(|class| {
+                        FindWindowExW(parent, null_mut(), wide(class).as_ptr(), title.as_ptr())
+                            .is_null()
+                    })
             }) {
                 let mut reply = 0;
                 SendMessageTimeoutW(prog, 0x052c, 0xd, 0, SMTO_ABORTIFHUNG, 1000, &mut reply);
@@ -85,9 +161,15 @@ impl Surface {
                 layer.context("Waiting for Explorer’s wallpaper surface")?;
             let ex = WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_LAYERED;
             let instance = GetModuleHandleW(null());
-            let class = wide(if black { BLACK_SURFACE_CLASS } else { "STATIC" });
-            if black {
-                register_black_surface(instance, &class)?;
+            let class = wide(match kind {
+                SurfaceKind::Video => "STATIC",
+                SurfaceKind::Black => BLACK_SURFACE_CLASS,
+                SurfaceKind::Still => STILL_SURFACE_CLASS,
+            });
+            match kind {
+                SurfaceKind::Black => register_black_surface(instance, &class)?,
+                SurfaceKind::Still => register_still_surface(instance, &class)?,
+                SurfaceKind::Video => {}
             }
             let hwnd = CreateWindowExW(
                 ex,
@@ -108,11 +190,57 @@ impl Surface {
                 "Cannot create wallpaper surface: {}",
                 std::io::Error::last_os_error()
             );
-            let surface = Self { hwnd, parent };
+            let surface = Self {
+                hwnd,
+                parent,
+                bitmap: null_mut(),
+            };
             surface.opacity(0)?;
             surface.place(r, insert_after)?;
             Ok(surface)
         }
+    }
+    pub fn set_bitmap(&mut self, width: u32, height: u32, bgra: &[u8]) -> Result<()> {
+        let expected = width as usize * height as usize * 4;
+        ensure!(
+            width > 0 && height > 0 && bgra.len() == expected,
+            "Invalid static wallpaper bitmap"
+        );
+        unsafe {
+            let mut info: BITMAPINFO = std::mem::zeroed();
+            info.bmiHeader = BITMAPINFOHEADER {
+                biSize: size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: width as i32,
+                biHeight: -(height as i32),
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB,
+                ..std::mem::zeroed()
+            };
+            let mut bits: *mut std::ffi::c_void = null_mut();
+            let bmp = CreateDIBSection(
+                null_mut(),
+                &info,
+                DIB_RGB_COLORS,
+                &mut bits,
+                null_mut(),
+                0,
+            );
+            ensure!(
+                !bmp.is_null() && !bits.is_null(),
+                "Cannot allocate static wallpaper bitmap: {}",
+                std::io::Error::last_os_error()
+            );
+            std::ptr::copy_nonoverlapping(bgra.as_ptr(), bits.cast::<u8>(), expected);
+            SetWindowLongPtrW(self.hwnd, GWLP_USERDATA, bmp as isize);
+            if !self.bitmap.is_null() {
+                DeleteObject(self.bitmap);
+            }
+            self.bitmap = bmp;
+            InvalidateRect(self.hwnd, null(), 0);
+            UpdateWindow(self.hwnd);
+        }
+        Ok(())
     }
     pub fn raise(&self, desktop: Rect) -> Result<()> {
         unsafe {
@@ -206,6 +334,9 @@ impl Drop for Surface {
     fn drop(&mut self) {
         unsafe {
             DestroyWindow(self.hwnd);
+            if !self.bitmap.is_null() {
+                DeleteObject(self.bitmap);
+            }
         }
     }
 }
@@ -323,7 +454,11 @@ mod tests {
                     null(),
                 );
                 assert!(!hwnd.is_null());
-                Surface { hwnd, parent }
+                Surface {
+                    hwnd,
+                    parent,
+                    bitmap: null_mut(),
+                }
             };
             let desk = window(null_mut(), WS_POPUP);
             let child = || window(desk.hwnd, WS_CHILD | WS_VISIBLE);

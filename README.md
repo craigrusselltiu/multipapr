@@ -53,13 +53,11 @@ The problem Multipapr tries to solve is the visible jump where a wallpaper cross
 ## Features
 
 <table>
-  <tr><td><b>Multi-mode</b></td><td>Give each display its own wallpaper. Select a display to see its full wallpaper and adjust its framing. Click empty canvas to preview every wallpaper cropped to its display. Open <b>Advanced</b> below Wallpaper for exact display sizes and offsets.</td></tr>
-  <tr><td><b>Profiles</b></td><td>The bookmark in the title bar lists your wallpaper setups. Switching profiles keeps the current Multi-mode setting. Connecting or disconnecting a monitor keeps the same crop on the remaining screens. If the active profile has a saved framing for that exact monitor combination, Multipapr restores it. Edits save automatically.</td></tr>
-  <tr><td><b>Gallery</b></td><td>Browse animated wallpapers from MotionBGs and DesktopHut and stills from Wallhaven's Hot feed. Click a wallpaper to apply it, hover for a larger preview, or right-click for display and delete options. Use <b>Downloaded</b> to browse saved and imported wallpapers offline. Files are stored in <code>%LOCALAPPDATA%\Multipapr\Wallpapers</code>.</td></tr>
-  <tr><td><b>Snapping</b></td><td>Dragged wallpapers snap to display edges, and dragged displays snap to the wallpaper and to other displays. Hold <kbd>Shift</kbd> to place freely.</td></tr>
+  <tr><td><b>Multi-mode</b></td><td>Give each display its own wallpaper setup.</td></tr>
+  <tr><td><b>Profiles</b></td><td>Save wallpaper setups to switch between them later.</td></tr>
+  <tr><td><b>Gallery</b></td><td>Browse still and animated wallpapers from a large source collection.</td></tr>
   <tr><td><b>Lock axis</b></td><td>Hold <kbd>Ctrl</kbd> for horizontal, <kbd>Ctrl</kbd>+<kbd>Shift</kbd> for vertical.</td></tr>
   <tr><td><b>Tray</b></td><td>Click to reopen. Right-click → <b>Close</b> to stop the wallpaper.</td></tr>
-  <tr><td><b>Settings</b></td><td>Toggle <b>Start at sign-in</b>, <b>Close to system tray</b> or update Multipapr from the cog icon.</td></tr>
 </table>
 
 ## Playback
@@ -68,8 +66,6 @@ The problem Multipapr tries to solve is the visible jump where a wallpaper cross
 > Playback uses [mpv](https://mpv.io/), which is built into the exe and unpacked once on first use.
 
 Multipapr decodes a shared video once, using the GPU when possible. Still images render once and then idle.
-
-**Multi-mode** uses one player per display. In **Settings → Playback**, **Fullscreen game detected** covers fullscreen foreground apps, including borderless games. **Battery saver** follows Windows Energy Saver. Both settings can keep playing (on visible displays for fullscreen apps), pause all wallpapers, or stop to free memory. Multipapr pauses playback when Windows locks and resumes automatically when conditions clear.
 
 ## CLI
 

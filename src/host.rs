@@ -1,13 +1,13 @@
 mod playback;
 use crate::{
-    desktop::{self, Handle, Surface, wide},
+    desktop::{self, Handle, Surface, SurfaceKind, wide},
     displays,
     layout::{Display, Layout, Rect, Settings, display_set, follow_displays},
-    process,
+    process, render,
     shader::{self, Part},
     storage::{self, PlaybackAction, Preferences},
     tray::{self, Tray},
-    update,
+    update, windows_bg,
 };
 use anyhow::{Context, Result, ensure};
 use playback::{PlaybackPolicy, Players};
@@ -20,6 +20,10 @@ use std::{
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     ptr::{null, null_mut},
+    sync::{
+        Arc,
+        mpsc::{Receiver, TryRecvError, channel},
+    },
     time::{Duration, Instant, SystemTime},
 };
 use windows_sys::Win32::{
@@ -211,6 +215,7 @@ pub fn player_pipe(host_id: u32, multi: bool, part: &Part, displays: &[Display])
     let mut hash = DefaultHasher::new();
     multi.hash(&mut hash);
     part.media.hash(&mut hash);
+    part.paused.hash(&mut hash);
     for &i in &part.displays {
         let d = &displays[i];
         d.id.hash(&mut hash);
@@ -285,7 +290,7 @@ struct Player {
     part: Part,
     started: Instant,
     still: Option<bool>,
-    playback: Option<MediaPlayback>,
+    backend: PlayerBackend,
     surface: Surface,
     pipe: PathBuf,
     desktop: Rect,
@@ -293,12 +298,63 @@ struct Player {
     pending_mapping: Option<String>,
 }
 
+enum PlayerBackend {
+    Black,
+    Mpv(MediaPlayback),
+    Static(Box<StaticPlayback>),
+}
+
 struct MediaPlayback {
     process: ManagedChild,
     work: tempfile::TempDir,
 }
 
+type FrameLoadResult = Result<(Arc<render::SourceImage>, u32, u32, Vec<u8>)>;
+type RenderResult = Result<(u32, u32, Vec<u8>)>;
+
+struct StaticPlayback {
+    frame: Option<Arc<render::SourceImage>>,
+    pending_frame: Option<Receiver<FrameLoadResult>>,
+    pending_render: Option<Receiver<RenderResult>>,
+    stale_render: Option<(Settings, Vec<Display>, Part)>,
+}
+
+impl StaticPlayback {
+    fn start_render(&mut self, settings: &Settings, displays: &[Display], part: &Part) {
+        let Some(frame) = self.frame.as_ref().map(Arc::clone) else {
+            self.stale_render = Some((settings.clone(), displays.to_vec(), part.clone()));
+            return;
+        };
+        if self.pending_render.is_some() {
+            self.stale_render = Some((settings.clone(), displays.to_vec(), part.clone()));
+            return;
+        }
+        let settings = settings.clone();
+        let displays = displays.to_vec();
+        let part = part.clone();
+        let (tx, rx) = channel();
+        std::thread::spawn(move || {
+            let layout = Layout::new(&displays, &settings.calibration);
+            let _ = tx.send(render::render_part_bgra(
+                &frame, &layout, &settings, &displays, &part,
+            ));
+        });
+        self.pending_render = Some(rx);
+    }
+}
+
 impl Player {
+    fn is_black(&self) -> bool {
+        matches!(self.backend, PlayerBackend::Black)
+    }
+
+    fn has_pending_render(&self) -> bool {
+        matches!(
+            &self.backend,
+            PlayerBackend::Static(st) if st.pending_render.is_some()
+        )
+    }
+
     fn open(part: &Part, settings: &Settings, displays: &[Display]) -> Result<Self> {
         let black = part.media.as_os_str().is_empty();
         ensure!(
@@ -307,18 +363,49 @@ impl Player {
             part.missing_wallpaper(settings.multi)
         );
         let desktop = part.desktop(displays);
+        let kind = if black {
+            SurfaceKind::Black
+        } else if part.paused {
+            SurfaceKind::Still
+        } else {
+            SurfaceKind::Video
+        };
         let mut player = Self {
             part: part.clone(),
             started: Instant::now(),
             still: black.then_some(true),
-            playback: None,
-            surface: Surface::create(desktop, black)?,
+            backend: PlayerBackend::Black,
+            surface: Surface::create(desktop, kind)?,
             pipe: player_pipe(std::process::id(), settings.multi, part, displays),
             desktop,
             covered: false,
             pending_mapping: None,
         };
         if black {
+            return Ok(player);
+        }
+        let media = std::path::absolute(&part.media)?;
+        if part.paused {
+            let settings = settings.clone();
+            let displays = displays.to_vec();
+            let part = part.clone();
+            let (tx, rx) = channel();
+            std::thread::spawn(move || {
+                let result = render::decode_source(&media).and_then(|source| {
+                    let frame = Arc::new(source);
+                    let layout = Layout::new(&displays, &settings.calibration);
+                    let (w, h, bgra) =
+                        render::render_part_bgra(&frame, &layout, &settings, &displays, &part)?;
+                    Ok((frame, w, h, bgra))
+                });
+                let _ = tx.send(result);
+            });
+            player.backend = PlayerBackend::Static(Box::new(StaticPlayback {
+                frame: None,
+                pending_frame: Some(rx),
+                pending_render: None,
+                stale_render: None,
+            }));
             return Ok(player);
         }
         let layout = Layout::new(displays, &settings.calibration);
@@ -330,7 +417,6 @@ impl Player {
         fs::write(&shader_path, shader::generate(displays, part))?;
         let profile = dir.join("playback.conf");
         let log = fs::File::create(work.path().join("mpv.log"))?;
-        let media = std::path::absolute(&part.media)?;
         let mut command = storage::wallpaper_command(&media)?;
         command
             .current_dir(work.path())
@@ -377,37 +463,103 @@ impl Player {
             .arg("--")
             .arg(&media);
         let process = ManagedChild::spawn(&mut command).context("Cannot launch mpv")?;
-        player.playback = Some(MediaPlayback { process, work });
+        player.backend = PlayerBackend::Mpv(MediaPlayback { process, work });
         Ok(player)
     }
-    fn check(&mut self) -> Result<()> {
-        let Some(playback) = self.playback.as_mut() else {
-            return Ok(());
-        };
-        if let Some(status) = playback.process.child.try_wait()? {
-            let log = playback.work.path().join("mpv.log");
-            let name = format!("player-{}.log", self.part.displays[0]);
-            fs::copy(log, storage::home()?.join(&name))?;
-            anyhow::bail!("Player exited ({status}). See {name}");
-        }
-        if self.still.is_none() {
-            if let Ok(frame) = fs::read(playback.work.path().join("first-frame")) {
-                self.still = match frame.as_slice() {
-                    b"still" => Some(true),
-                    b"video" => Some(false),
-                    _ => None,
-                };
+
+    fn update_mapping_for(
+        &mut self,
+        layout: &Layout,
+        settings: &Settings,
+        displays: &[Display],
+        part: &Part,
+    ) {
+        match &mut self.backend {
+            PlayerBackend::Black => {}
+            PlayerBackend::Mpv(_) => {
+                self.pending_mapping = Some(shader::parameters(layout, settings, displays, part));
             }
-            ensure!(
-                self.still.is_some() || self.started.elapsed() < Duration::from_secs(30),
-                "Timed out waiting for a rendered frame"
-            );
+            PlayerBackend::Static(st) => {
+                st.start_render(settings, displays, part);
+            }
         }
-        Ok(())
+    }
+
+    fn check(&mut self) -> Result<()> {
+        match &mut self.backend {
+            PlayerBackend::Black => Ok(()),
+            PlayerBackend::Mpv(playback) => {
+                if let Some(status) = playback.process.child.try_wait()? {
+                    let log = playback.work.path().join("mpv.log");
+                    let name = format!("player-{}.log", self.part.displays[0]);
+                    fs::copy(log, storage::home()?.join(&name))?;
+                    anyhow::bail!("Player exited ({status}). See {name}");
+                }
+                if self.still.is_none() {
+                    if let Ok(frame) = fs::read(playback.work.path().join("first-frame")) {
+                        self.still = match frame.as_slice() {
+                            b"still" => Some(true),
+                            b"video" => Some(false),
+                            _ => None,
+                        };
+                    }
+                    ensure!(
+                        self.still.is_some() || self.started.elapsed() < Duration::from_secs(30),
+                        "Timed out waiting for a rendered frame"
+                    );
+                }
+                Ok(())
+            }
+            PlayerBackend::Static(st) => {
+                if let Some(rx) = &st.pending_frame {
+                    match rx.try_recv() {
+                        Ok(Ok((frame, w, h, bgra))) => {
+                            st.pending_frame = None;
+                            self.surface.set_bitmap(w, h, &bgra)?;
+                            st.frame = Some(frame);
+                            self.still = Some(true);
+                            if let Some((settings, displays, part)) = st.stale_render.take() {
+                                st.start_render(&settings, &displays, &part);
+                            }
+                        }
+                        Ok(Err(error)) => {
+                            st.pending_frame = None;
+                            return Err(error);
+                        }
+                        Err(TryRecvError::Disconnected) => {
+                            st.pending_frame = None;
+                            anyhow::bail!("Static wallpaper decoder stopped");
+                        }
+                        Err(TryRecvError::Empty) => {
+                            ensure!(
+                                self.started.elapsed() < Duration::from_secs(30),
+                                "Timed out waiting for a rendered frame"
+                            );
+                        }
+                    }
+                }
+                if let Some(rx) = &st.pending_render {
+                    match rx.try_recv() {
+                        Ok(Ok((w, h, bgra))) => {
+                            st.pending_render = None;
+                            self.surface.set_bitmap(w, h, &bgra)?;
+                            if let Some((settings, displays, part)) = st.stale_render.take() {
+                                st.start_render(&settings, &displays, &part);
+                            }
+                        }
+                        Ok(Err(_)) | Err(TryRecvError::Disconnected) => {
+                            st.pending_render = None;
+                        }
+                        Err(TryRecvError::Empty) => {}
+                    }
+                }
+                Ok(())
+            }
+        }
     }
     fn update(&mut self, covered: bool) -> Result<()> {
         self.surface.maintain(self.desktop)?;
-        if self.playback.is_none() {
+        if !matches!(self.backend, PlayerBackend::Mpv(_)) {
             return Ok(());
         }
         if let Some(parameters) = &self.pending_mapping
@@ -463,6 +615,7 @@ pub fn run(mut show_editor: bool) -> Result<()> {
         let mut stamp = None;
         let mut topology = Vec::new();
         let mut players = Players::default();
+        let mut windows_bg = windows_bg::Syncer::default();
         let mut current = None;
         let mut last_report = None;
         let preferences_path = dir.join("preferences.json");
@@ -494,6 +647,7 @@ pub fn run(mut show_editor: bool) -> Result<()> {
                     let mut new_stamp = version(&config);
                     if new_stamp.is_none() {
                         players = Players::default();
+                        windows_bg.disable();
                         let _ = fs::remove_file(dir.join("playback.json"));
                         last_report = None;
                         stamp = None;
@@ -547,9 +701,17 @@ pub fn run(mut show_editor: bool) -> Result<()> {
                         preferences = storage::load_preferences();
                         pref_stamp = observed;
                     }
+                    let settings = current.as_ref().context("Waiting for layout")?;
                     let policy = PlaybackPolicy::detect(&displays, &preferences);
+                    if preferences.windows_background {
+                        if !policy.is_locked() {
+                            windows_bg.sync(settings, &displays);
+                        }
+                    } else {
+                        windows_bg.disable();
+                    }
                     let mut report = players.reconcile(
-                        current.as_ref().context("Waiting for layout")?,
+                        settings,
                         &displays,
                         &policy,
                         changed || follow,
@@ -580,6 +742,9 @@ pub fn run(mut show_editor: bool) -> Result<()> {
                         next = now + Duration::from_secs(4);
                     }
                 }
+            }
+            if windows_bg.take_completed() {
+                players.maintain_surfaces();
             }
             let was_loading = players.is_loading();
             if let Err(e) = players.advance() {

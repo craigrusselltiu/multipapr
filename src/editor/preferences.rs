@@ -350,14 +350,20 @@ fn setting_row<R>(
                                 .font(heading_font(13.5))
                                 .color(Color32::from_gray(242)),
                         );
-                        ui.add(
-                            Label::new(
-                                RichText::new(description)
-                                    .font(FontId::proportional(12.5))
-                                    .color(SUBTEXT),
-                            )
-                            .wrap(),
+                        let font = FontId::proportional(12.5);
+                        let truncated = ui
+                            .painter()
+                            .layout_no_wrap(description.to_owned(), font.clone(), SUBTEXT)
+                            .size()
+                            .x
+                            > text_width;
+                        let desc = ui.add(
+                            Label::new(RichText::new(description).font(font).color(SUBTEXT))
+                                .truncate(),
                         );
+                        if truncated {
+                            desc.hint(description);
+                        }
                     },
                 );
                 let row_height = text.response.rect.height().max(control_size.y);
@@ -605,7 +611,7 @@ impl SettingsPopup {
             if setting_row(
                 ui,
                 "Start at sign-in",
-                "Launch Multipapr in the background when you sign in to Windows.",
+                "Launch in the background when you sign in to Windows.",
                 toggle_size,
                 |ui| toggle_switch(ui, login, "Start at sign-in"),
             )
@@ -620,7 +626,7 @@ impl SettingsPopup {
             if setting_row(
                 ui,
                 "Close to system tray",
-                "Keep the wallpaper running in the tray when you close this window.",
+                "Keep wallpapers running in the tray on close.",
                 toggle_size,
                 |ui| toggle_switch(ui, &mut preferences.close_to_tray, "Close to system tray"),
             )
@@ -628,6 +634,27 @@ impl SettingsPopup {
             {
                 self.error = storage::save_preferences(preferences).err().map(|e| {
                     preferences.close_to_tray = !preferences.close_to_tray;
+                    e.to_string()
+                });
+            }
+            hairline(ui);
+            if setting_row(
+                ui,
+                "Set Windows background",
+                "Match Windows’ desktop background to each display.",
+                toggle_size,
+                |ui| {
+                    toggle_switch(
+                        ui,
+                        &mut preferences.windows_background,
+                        "Set Windows background",
+                    )
+                },
+            )
+            .changed()
+            {
+                self.error = storage::save_preferences(preferences).err().map(|e| {
+                    preferences.windows_background = !preferences.windows_background;
                     e.to_string()
                 });
             }
@@ -672,7 +699,7 @@ impl SettingsPopup {
             let confirming = self.confirm_clear;
             let size = gallery_size(gallery.bytes());
             let description = if confirming {
-                format!("Delete {size} of downloaded and imported copies?")
+                format!("Delete {size} of saved wallpapers?")
             } else if gallery.removing() {
                 "Deleting wallpapers…".into()
             } else if gallery.scanning() && gallery.bytes() == 0 {
@@ -916,9 +943,9 @@ mod tests {
             (dialog, body, output.shapes)
         };
         for (size, overflow) in [
-            (vec2(1080., 680.), false),
+            (vec2(1160., 760.), false),
             (vec2(760., 450.), true),
-            (vec2(1080., 680.), false),
+            (vec2(1160., 760.), false),
         ] {
             for _ in 0..3 {
                 frame(size);
@@ -932,6 +959,7 @@ mod tests {
             );
             for label in [
                 "General",
+                "Set Windows background",
                 "Fullscreen game detected",
                 "Battery saver",
                 "About",
@@ -1002,7 +1030,7 @@ mod tests {
         let mut draw = || {
             ctx.run(
                 RawInput {
-                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1080., 680.))),
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1160., 760.))),
                     ..Default::default()
                 },
                 |ctx| {
@@ -1050,6 +1078,79 @@ mod tests {
             .unwrap();
         assert!(delete.contains_rect(button_text("Delete")));
         assert!(delete.left() - cancel.right() >= 9.);
+    }
+
+    #[test]
+    fn confirm_clear_and_update_errors_stay_single_line_without_triggering_scrollbar() {
+        let ctx = Context::default();
+        super::super::set_fonts(&ctx);
+        ctx.style_mut(|s| {
+            s.spacing.item_spacing = vec2(8., 10.);
+            s.spacing.interact_size.y = 36.;
+            s.spacing.button_padding = vec2(14., 8.);
+        });
+        let mut popup = SettingsPopup {
+            confirm_clear: true,
+            ..Default::default()
+        };
+        let mut gallery = Gallery::default();
+        gallery.record_saved(crate::gallery::SavedWallpaper {
+            media: crate::layout::Media {
+                path: "big.mp4".into(),
+                ..Default::default()
+            },
+            title: "Big".into(),
+            origin: None,
+            animated: true,
+            bytes: 73_714_892, // 70.3 MB
+        });
+        let mut login = false;
+        let mut prefs = storage::Preferences::default();
+        let update = UpdateState {
+            phase: UpdatePhase::CheckFailed(
+                "Could not reach api.github.com because the connection timed out after retrying."
+                    .into(),
+            ),
+            error: None,
+        };
+        let size = vec2(1160., 760.);
+        let mut body = None;
+        let mut output = None;
+        for _ in 0..3 {
+            output = Some(ctx.run(
+                RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, size)),
+                    ..Default::default()
+                },
+                |ctx| {
+                    let modal = settings_dialog(ctx, 1., |ui| {
+                        popup.contents(ui, &mut login, &mut prefs, &update, &gallery, false)
+                    });
+                    body = Some(modal.inner.1);
+                },
+            ));
+        }
+        let body = body.unwrap();
+        let output = output.unwrap();
+        assert!(
+            body.content_size.y <= body.inner_rect.height() + 1.,
+            "unexpected scrollbar: {:?} vs {:?}",
+            body.content_size,
+            body.inner_rect
+        );
+        for shape in &output.shapes {
+            if let Shape::Text(t) = &shape.shape {
+                assert_eq!(
+                    t.galley.rows.len(),
+                    1,
+                    "settings text wrapped onto multiple lines: {:?}",
+                    t.galley.text()
+                );
+            }
+        }
+        assert!(output.shapes.iter().any(|s| matches!(&s.shape,
+            Shape::Text(t) if t.galley.text() == "Delete 70.3 MB of saved wallpapers?"
+        )));
     }
 
     #[test]

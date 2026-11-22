@@ -99,6 +99,7 @@ vec4 source(vec2 uv) {
 pub struct Part {
     pub media: PathBuf,
     pub displays: Vec<usize>,
+    pub paused: bool,
 }
 impl Part {
     pub fn missing_wallpaper(&self, multi: bool) -> String {
@@ -124,15 +125,20 @@ pub fn missing_wallpaper(display: Option<usize>, name: Option<&std::ffi::OsStr>)
 pub fn plan(settings: &Settings, displays: &[Display]) -> Vec<Part> {
     let parts = if settings.multi {
         (0..displays.len())
-            .map(|i| Part {
-                media: settings.shown(&displays[i].id).media.path.clone(),
-                displays: vec![i],
+            .map(|i| {
+                let shown = settings.shown(&displays[i].id);
+                Part {
+                    media: shown.media.path.clone(),
+                    displays: vec![i],
+                    paused: shown.paused,
+                }
             })
             .collect()
     } else {
         vec![Part {
             media: settings.wallpaper.media.path.clone(),
             displays: (0..displays.len()).collect(),
+            paused: settings.wallpaper.paused,
         }]
     };
     parts
@@ -231,8 +237,16 @@ mod tests {
                 == [Part {
                     media: "span.mp4".into(),
                     displays: vec![0, 1, 2],
+                    paused: false,
                 }]
         );
+        let playing_pipe = crate::host::player_pipe(42, settings.multi, &plan(&settings, &displays)[0], &displays);
+        settings.wallpaper.paused = true;
+        assert_ne!(
+            playing_pipe,
+            crate::host::player_pipe(42, settings.multi, &plan(&settings, &displays)[0], &displays)
+        );
+        settings.wallpaper.paused = false;
         settings.multi = true;
         settings
             .screens

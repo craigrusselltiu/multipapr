@@ -117,6 +117,8 @@ pub struct Wallpaper {
     pub stretch: f32,
     #[serde(default)]
     pub center: [f32; 2],
+    #[serde(default)]
+    pub paused: bool,
 }
 impl Wallpaper {
     pub fn new(media: Media) -> Self {
@@ -125,6 +127,7 @@ impl Wallpaper {
             scale: 1.,
             stretch: 1.,
             center: [0.; 2],
+            paused: false,
         }
     }
     pub fn is_empty(&self) -> bool {
@@ -222,6 +225,7 @@ impl Settings {
                 self.screens.remove(&display.id);
             } else {
                 let mut wallpaper = Wallpaper::new(self.wallpaper.media.clone());
+                wallpaper.paused = self.wallpaper.paused;
                 wallpaper.cover(pitch, *panel);
                 self.screens.insert(display.id.clone(), wallpaper);
             }
@@ -273,6 +277,8 @@ pub struct Profile {
     pub name: String,
     pub media: Media,
     #[serde(default)]
+    pub paused: bool,
+    #[serde(default)]
     pub upscaling: Upscaling,
     #[serde(default)]
     pub framings: BTreeMap<String, Framing>,
@@ -289,6 +295,7 @@ impl Profile {
         let mut changed = !self.media.path.as_os_str().is_empty() && matches(&self.media.path);
         if changed {
             self.media = Media::default();
+            self.paused = false;
             self.framings.clear();
         }
         changed |= forget_screen_wallpapers(&mut self.screens, self.multi, matches);
@@ -298,6 +305,7 @@ impl Profile {
         let mut profile = Self {
             name: name.into(),
             media: s.wallpaper.media.clone(),
+            paused: s.wallpaper.paused,
             upscaling: s.upscaling,
             framings: BTreeMap::new(),
             multi: s.multi,
@@ -311,6 +319,7 @@ impl Profile {
             self.framings.clear();
         }
         self.media = s.wallpaper.media.clone();
+        self.paused = s.wallpaper.paused;
         self.upscaling = s.upscaling;
         self.multi = s.multi;
         self.screens = s.screens.clone();
@@ -326,6 +335,7 @@ impl Profile {
     }
     pub fn apply(&self, s: &mut Settings, layout: &Layout, set: &str) {
         s.wallpaper.media = self.media.clone();
+        s.wallpaper.paused = self.paused;
         s.upscaling = self.upscaling;
         s.profile = Some(self.name.clone());
         s.screens = self.screens.clone();
