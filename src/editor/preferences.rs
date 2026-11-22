@@ -1,6 +1,9 @@
-use super::{ACCENT, Editor, FIELD, INK, LINE, MUTED, PANEL, heading_font, icons::Icon, storage};
+use super::{
+    ACCENT, Editor, FIELD, INK, LINE, MUTED, PANEL, gallery::Gallery, heading_font, icons::Icon,
+    popup, storage,
+};
 use crate::{
-    host,
+    host, process,
     update::{self, CheckOutcome, Release},
 };
 use anyhow::{Context as _, Result};
@@ -22,12 +25,15 @@ use tempfile::NamedTempFile;
 use windows_sys::Win32::UI::WindowsAndMessaging::AllowSetForegroundWindow;
 
 const MODAL_WIDTH: f32 = 560.;
+const DIALOG_ID: &str = "settings dialog";
 const CARD_BORDER: Color32 = Color32::from_rgb(47, 47, 54);
 const SUBTEXT: Color32 = Color32::from_rgb(154, 153, 165);
+const DELETE_FILL: Color32 = Color32::from_rgb(174, 54, 72);
 
 #[derive(Default)]
 pub(super) struct SettingsPopup {
     error: Option<String>,
+    confirm_clear: bool,
 }
 
 struct DownloadProgress {
@@ -142,9 +148,19 @@ enum UpdateAction {
     None,
     Recheck,
     Install(Release),
+    ClearGallery,
 }
 
-fn blur_editor(info: PaintCallbackInfo, painter: &eframe::egui_glow::Painter) {
+pub(super) fn blur_backdrop(ctx: &Context, opacity: f32) {
+    ctx.layer_painter(LayerId::background()).add(PaintCallback {
+        rect: ctx.screen_rect(),
+        callback: Arc::new(CallbackFn::new(move |info, painter| {
+            blur_editor(info, painter, opacity);
+        })),
+    });
+}
+
+fn blur_editor(info: PaintCallbackInfo, painter: &eframe::egui_glow::Painter, opacity: f32) {
     let gl = painter.gl();
     let [width, height] = info.screen_size_px.map(|n| n as i32);
     if width == 0 || height == 0 {
@@ -152,6 +168,7 @@ fn blur_editor(info: PaintCallbackInfo, painter: &eframe::egui_glow::Painter) {
     }
     let screen = (painter.intermediate_fbo(), width, height);
     let depth = (16. * info.pixels_per_point).log2().round().clamp(1., 6.) as usize;
+    let reduction = ((1 << depth) as f32).powf(opacity);
     let mut levels = Vec::with_capacity(depth + 1);
     levels.push(screen);
     let mut buffers = Vec::with_capacity(depth);
@@ -174,9 +191,14 @@ fn blur_editor(info: PaintCallbackInfo, painter: &eframe::egui_glow::Painter) {
                 glow::LINEAR,
             );
         };
-        for _ in 0..depth {
+        for step in 1..=depth {
+            let scale = ((1 << step) as f32).min(reduction);
             let previous = *levels.last().unwrap();
-            let (w, h) = ((previous.1 / 2).max(1), (previous.2 / 2).max(1));
+            let w = (width as f32 / scale).round().max(1.) as i32;
+            let h = (height as f32 / scale).round().max(1.) as i32;
+            if (w, h) == (previous.1, previous.2) {
+                break;
+            }
             let Ok(fbo) = gl.create_framebuffer() else {
                 break;
             };
@@ -200,6 +222,9 @@ fn blur_editor(info: PaintCallbackInfo, painter: &eframe::egui_glow::Painter) {
             let level = (Some(fbo), w, h);
             blit(previous, level);
             levels.push(level);
+            if scale >= reduction {
+                break;
+            }
         }
         for pair in levels.windows(2).rev() {
             blit(pair[1], pair[0]);
@@ -509,9 +534,7 @@ fn render_update_card(ui: &mut Ui, update: &UpdateState) -> UpdateAction {
 fn apply_update_and_relaunch(exe: &Path, staged: NamedTempFile) -> Result<()> {
     update::replace_executable(exe, staged)?;
     if !host::relaunch()? {
-        let child = storage::command(exe)
-            .arg("--editor")
-            .spawn()
+        let child = process::spawn(storage::command(exe).arg("--editor"))
             .context("Cannot relaunch Multipapr")?;
         unsafe {
             AllowSetForegroundWindow(child.id());
@@ -522,70 +545,67 @@ fn apply_update_and_relaunch(exe: &Path, staged: NamedTempFile) -> Result<()> {
 
 fn settings_dialog<R>(
     ctx: &Context,
+    opacity: f32,
     contents: impl FnOnce(&mut Ui) -> R,
 ) -> ModalResponse<(bool, scroll_area::ScrollAreaOutput<R>)> {
     let bounds = ctx.screen_rect().shrink(16.);
     let width = MODAL_WIDTH.min(bounds.width() - 2.);
-    let id = Id::new("settings dialog");
-    Modal::new(id)
-        .area(Modal::default_area(id).default_size(vec2(width + 2., bounds.height())))
-        .backdrop_color(Color32::from_black_alpha(96))
-        .frame(
-            Frame::new()
-                .fill(INK)
-                .inner_margin(0)
-                .corner_radius(14)
-                .stroke(Stroke::new(1.0_f32, LINE)),
-        )
-        .show(ctx, |ui| {
-            ui.set_width(width);
-            ui.set_max_height(bounds.height() - 2.);
-            ui.spacing_mut().item_spacing.y = 0.;
-            let close = Frame::new()
-                .inner_margin(Margin {
-                    left: 22,
-                    right: 14,
-                    top: 10,
-                    bottom: 10,
-                })
-                .show(ui, |ui| {
-                    let header_width = width - 36.;
-                    ui.set_min_width(header_width);
-                    ui.set_max_width(header_width);
-                    ui.horizontal(|ui| {
-                        ui.label(
-                            RichText::new("Settings")
-                                .font(heading_font(15.5))
-                                .color(Color32::from_gray(244)),
-                        );
-                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            Icon::Close.button(ui, "Close settings", false).clicked()
-                        })
-                        .inner
+    popup::dialog(
+        Id::new(DIALOG_ID),
+        vec2(width + 2., bounds.height()),
+        Margin::ZERO,
+        opacity,
+    )
+    .show(ctx, |ui| {
+        ui.multiply_opacity(opacity);
+        ui.set_width(width);
+        ui.set_max_height(bounds.height() - 2.);
+        ui.spacing_mut().item_spacing.y = 0.;
+        let close = Frame::new()
+            .inner_margin(Margin {
+                left: 22,
+                right: 14,
+                top: 10,
+                bottom: 10,
+            })
+            .show(ui, |ui| {
+                let header_width = width - 36.;
+                ui.set_min_width(header_width);
+                ui.set_max_width(header_width);
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new("Settings")
+                            .font(heading_font(15.5))
+                            .color(Color32::from_gray(244)),
+                    );
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        Icon::Close.button(ui, "Close settings", false).clicked()
                     })
                     .inner
                 })
-                .inner;
-            hairline(ui);
-            let scroll = Frame::new()
-                .inner_margin(Margin::symmetric(12, 12))
-                .show(ui, |ui| {
-                    ui.visuals_mut().clip_rect_margin = 0.;
-                    ui.spacing_mut().scroll = style::ScrollStyle::solid();
-                    ScrollArea::vertical()
-                        .id_salt("settings body")
-                        .scroll_bar_visibility(scroll_area::ScrollBarVisibility::VisibleWhenNeeded)
-                        .auto_shrink([false, true])
-                        .show(ui, |ui| {
-                            Frame::new()
-                                .inner_margin(Margin::symmetric(10, 6))
-                                .show(ui, contents)
-                                .inner
-                        })
-                })
-                .inner;
-            (close, scroll)
-        })
+                .inner
+            })
+            .inner;
+        hairline(ui);
+        let scroll = Frame::new()
+            .inner_margin(Margin::symmetric(12, 12))
+            .show(ui, |ui| {
+                ui.visuals_mut().clip_rect_margin = 0.;
+                ui.spacing_mut().scroll = style::ScrollStyle::solid();
+                ScrollArea::vertical()
+                    .id_salt("settings body")
+                    .scroll_bar_visibility(scroll_area::ScrollBarVisibility::VisibleWhenNeeded)
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| {
+                        Frame::new()
+                            .inner_margin(Margin::symmetric(10, 6))
+                            .show(ui, contents)
+                            .inner
+                    })
+            })
+            .inner;
+        (close, scroll)
+    })
 }
 
 impl SettingsPopup {
@@ -595,6 +615,8 @@ impl SettingsPopup {
         login: &mut bool,
         preferences: &mut storage::Preferences,
         update: &UpdateState,
+        gallery: &Gallery,
+        importing: bool,
     ) -> UpdateAction {
         section_heading(ui, "General");
         settings_card(ui, |ui| {
@@ -660,8 +682,99 @@ impl SettingsPopup {
             ui.add(Label::new(RichText::new(error).small().color(MUTED)).wrap());
         }
         ui.add_space(18.);
+        section_heading(ui, "Gallery");
+        let clear = settings_card(ui, |ui| {
+            const DELETE_WIDTH: f32 = 76.;
+            const CANCEL_WIDTH: f32 = 68.;
+            const BUTTON_GAP: f32 = 10.;
+            const BUTTON_HEIGHT: f32 = 30.;
+            let confirming = self.confirm_clear;
+            let size = gallery_size(gallery.bytes());
+            let description = if confirming {
+                format!("Delete {size} of downloaded and imported copies?")
+            } else if gallery.removing() {
+                "Deleting wallpapers…".into()
+            } else if gallery.scanning() && gallery.bytes() == 0 {
+                "Calculating size…".into()
+            } else {
+                format!("{size} stored")
+            };
+            let can_clear = gallery.bytes() > 0 && !importing && !gallery.removing();
+            let width = DELETE_WIDTH
+                + if confirming {
+                    CANCEL_WIDTH + BUTTON_GAP
+                } else {
+                    0.
+                };
+            setting_row(
+                ui,
+                "Clear gallery",
+                &description,
+                vec2(width, BUTTON_HEIGHT),
+                |ui| {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = BUTTON_GAP;
+                        ui.spacing_mut().interact_size.y = BUTTON_HEIGHT;
+                        let delete = ui
+                            .scope(|ui| {
+                                let widgets = &mut ui.visuals_mut().widgets;
+                                for (state, color) in [
+                                    (&mut widgets.inactive, DELETE_FILL),
+                                    (&mut widgets.hovered, Color32::from_rgb(194, 69, 84)),
+                                    (&mut widgets.active, Color32::from_rgb(149, 43, 61)),
+                                ] {
+                                    state.weak_bg_fill = color;
+                                    state.fg_stroke.color = Color32::WHITE;
+                                }
+                                ui.add_enabled(
+                                    can_clear,
+                                    Button::new("Delete")
+                                        .min_size(vec2(DELETE_WIDTH, BUTTON_HEIGHT)),
+                                )
+                                .clicked()
+                            })
+                            .inner;
+                        let cancel = confirming
+                            && ui
+                                .add_sized(vec2(CANCEL_WIDTH, BUTTON_HEIGHT), Button::new("Cancel"))
+                                .clicked();
+                        if delete || cancel {
+                            self.confirm_clear = delete && !confirming;
+                        }
+                        delete && confirming
+                    })
+                    .inner
+                },
+            )
+        });
+        if let Some(error) = gallery.error() {
+            ui.label(RichText::new(error).small().color(ACCENT));
+        }
+        ui.add_space(18.);
         section_heading(ui, "About");
-        render_update_card(ui, update)
+        let update = render_update_card(ui, update);
+        if clear {
+            UpdateAction::ClearGallery
+        } else {
+            update
+        }
+    }
+}
+
+fn gallery_size(bytes: u64) -> String {
+    let mut size = bytes as f64;
+    let mut unit = "B";
+    for next in ["KB", "MB", "GB", "TB"] {
+        if size < 1024. {
+            break;
+        }
+        size /= 1024.;
+        unit = next;
+    }
+    if unit == "B" {
+        format!("{bytes} B")
+    } else {
+        format!("{size:.1} {unit}")
     }
 }
 
@@ -724,14 +837,17 @@ impl Editor {
         }
     }
 
-    pub(super) fn show_preferences(&mut self, ctx: &Context) {
+    pub(super) fn show_preferences(&mut self, ctx: &Context, opacity: f32) {
         let popup = self.popup.as_mut().unwrap();
-        ctx.layer_painter(LayerId::background()).add(PaintCallback {
-            rect: ctx.screen_rect(),
-            callback: Arc::new(CallbackFn::new(blur_editor)),
-        });
-        let response = settings_dialog(ctx, |ui| {
-            popup.contents(ui, &mut self.login, &mut self.preferences, &self.update)
+        let response = settings_dialog(ctx, opacity, |ui| {
+            popup.contents(
+                ui,
+                &mut self.login,
+                &mut self.preferences,
+                &self.update,
+                &self.gallery,
+                !self.pending.is_empty(),
+            )
         });
         self.exit
             .close_to_tray
@@ -740,6 +856,7 @@ impl Editor {
         match response.inner.1.inner {
             UpdateAction::None => {}
             UpdateAction::Recheck => self.update.start_check(ctx),
+            UpdateAction::ClearGallery => self.remove_from_gallery(ctx, None),
             UpdateAction::Install(release) => {
                 if self.saved != self.settings {
                     self.persist();
@@ -748,6 +865,7 @@ impl Editor {
             }
         }
         if close {
+            self.closing_popup = popup::ClosingPopup::capture(ctx, Id::new(DIALOG_ID), opacity);
             self.popup = None;
             ctx.request_repaint();
         }
@@ -800,8 +918,15 @@ mod tests {
                     ..Default::default()
                 },
                 |ctx| {
-                    let modal = settings_dialog(ctx, |ui| {
-                        popup.contents(ui, &mut login, &mut prefs, &update)
+                    let modal = settings_dialog(ctx, 1., |ui| {
+                        popup.contents(
+                            ui,
+                            &mut login,
+                            &mut prefs,
+                            &update,
+                            &Gallery::default(),
+                            false,
+                        )
                     });
                     result = Some((modal.response.rect, modal.inner.1));
                 },
@@ -866,6 +991,84 @@ mod tests {
                 assert_eq!(body.state.offset.y, 0.);
             }
         }
+    }
+
+    #[test]
+    fn gallery_delete_is_red_and_spaced_from_cancel() {
+        let ctx = Context::default();
+        super::super::set_fonts(&ctx);
+        let mut popup = SettingsPopup {
+            confirm_clear: true,
+            ..Default::default()
+        };
+        let mut gallery = Gallery::default();
+        gallery.record_saved(crate::gallery::SavedWallpaper {
+            media: crate::layout::Media {
+                path: "example.png".into(),
+                ..Default::default()
+            },
+            title: "Saved wallpaper".into(),
+            origin: None,
+            animated: false,
+            bytes: 1024,
+        });
+        let mut login = false;
+        let mut prefs = storage::Preferences::default();
+        let update = UpdateState {
+            phase: UpdatePhase::Latest,
+            error: None,
+        };
+        let mut draw = || {
+            ctx.run(
+                RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1080., 680.))),
+                    ..Default::default()
+                },
+                |ctx| {
+                    settings_dialog(ctx, 1., |ui| {
+                        popup.contents(ui, &mut login, &mut prefs, &update, &gallery, false)
+                    });
+                },
+            )
+        };
+        draw();
+        let output = draw();
+        let button_text = |label| {
+            output
+                .shapes
+                .iter()
+                .find_map(|shape| match &shape.shape {
+                    Shape::Text(text) if text.galley.text() == label => {
+                        Some(text.visual_bounding_rect())
+                    }
+                    _ => None,
+                })
+                .unwrap()
+        };
+        let delete = output
+            .shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                Shape::Rect(rect) if rect.fill == DELETE_FILL => Some(rect.rect),
+                _ => None,
+            })
+            .unwrap();
+        let cancel_text = button_text("Cancel");
+        let cancel = output
+            .shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                Shape::Rect(rect)
+                    if (rect.rect.width() - 68.).abs() < 1.
+                        && rect.rect.contains_rect(cancel_text) =>
+                {
+                    Some(rect.rect)
+                }
+                _ => None,
+            })
+            .unwrap();
+        assert!(delete.contains_rect(button_text("Delete")));
+        assert!(delete.left() - cancel.right() >= 9.);
     }
 
     #[test]

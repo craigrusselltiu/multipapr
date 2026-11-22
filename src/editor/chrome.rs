@@ -7,14 +7,17 @@ use windows_sys::Win32::{
     UI::{HiDpi::GetDpiForWindow, Shell::*, WindowsAndMessaging::*},
 };
 
-const HEIGHT: f32 = 50.;
+const HEIGHT: f32 = 46.;
 const CONTROL_WIDTH: f32 = 46.;
-const CONTROLS: f32 = 7.;
+const CONTROLS: f32 = 8.;
+const GALLERY: &str = "Gallery";
 
 pub struct Actions {
     pub settings: bool,
     pub undo: bool,
     pub redo: bool,
+    pub gallery: bool,
+    pub gallery_id: Id,
     pub profiles: bool,
     pub profiles_anchor: Rect,
 }
@@ -117,6 +120,7 @@ pub fn show(
     can_undo: bool,
     can_redo: bool,
     profiles_open: bool,
+    gallery_open: bool,
 ) -> Actions {
     TopBottomPanel::top("app bar")
         .exact_height(HEIGHT)
@@ -127,7 +131,7 @@ pub fn show(
             let draw = ui.painter().clone();
             draw.image(
                 brand,
-                Rect::from_center_size(area.left_center() + vec2(33., 0.), Vec2::splat(36.)),
+                Rect::from_center_size(area.left_center() + vec2(33., 0.), Vec2::splat(34.)),
                 Rect::from_min_max(Pos2::ZERO, pos2(1., 1.)),
                 Color32::WHITE,
             );
@@ -153,16 +157,23 @@ pub fn show(
                 settings: false,
                 undo: false,
                 redo: false,
+                gallery: false,
+                gallery_id: ui.id().with(GALLERY),
                 profiles: false,
                 profiles_anchor: slot(5.),
             };
             for (n, icon, label, enabled, action) in [
-                (7., Icon::Undo, "Undo", can_undo, &mut actions.undo),
-                (6., Icon::Redo, "Redo", can_redo, &mut actions.redo),
+                (8., Icon::Undo, "Undo", can_undo, &mut actions.undo),
+                (7., Icon::Redo, "Redo", can_redo, &mut actions.redo),
+                (6., Icon::Gallery, GALLERY, true, &mut actions.gallery),
                 (5., Icon::Profiles, "Profiles", true, &mut actions.profiles),
                 (4., Icon::Cog, "Settings", true, &mut actions.settings),
             ] {
-                let open = matches!(icon, Icon::Profiles) && profiles_open;
+                let open = match icon {
+                    Icon::Gallery => gallery_open,
+                    Icon::Profiles => profiles_open,
+                    _ => false,
+                };
                 let r = slot(n);
                 let sense = if enabled {
                     Sense::click()
@@ -172,7 +183,7 @@ pub fn show(
                 let response = ui.interact(r, ui.id().with(label), sense);
                 response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, enabled, label));
                 if open || enabled && (response.hovered() || response.has_focus()) {
-                    draw.rect_filled(r.shrink2(vec2(5., 7.)), 7, LINE);
+                    draw.rect_filled(r.shrink2(vec2(5., 6.)), 7, LINE);
                 }
                 let tint = if open {
                     ACCENT
@@ -183,11 +194,11 @@ pub fn show(
                 };
                 icon.paint(&draw, r.center(), tint);
                 *action = response.clicked();
-                if matches!(icon, Icon::Profiles) && !profiles_open {
+                if matches!(icon, Icon::Gallery | Icon::Profiles) && !open {
                     response.on_hover_text(label);
                 }
             }
-            let divider = slot(5.).left();
+            let divider = slot(6.).left();
             draw.vline(
                 divider,
                 Rangef::new(area.center().y - 10., area.center().y + 10.),
@@ -293,7 +304,7 @@ mod tests {
                 .unwrap()
                 .maximized = Some(maximized);
             ctx.run(input, |ctx| {
-                show(ctx, TextureId::default(), true, false, false, false);
+                show(ctx, TextureId::default(), true, false, false, false, false);
             })
         };
         for (column, maximized, expected) in [

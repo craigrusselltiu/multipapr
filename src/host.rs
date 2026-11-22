@@ -3,6 +3,7 @@ use crate::{
     desktop::{self, Handle, Surface, wide},
     displays,
     layout::{Display, Layout, Rect, Settings, display_set, follow_displays},
+    process,
     shader::{self, Part},
     storage::{self, PlaybackAction, Preferences},
     tray::{self, Tray},
@@ -70,9 +71,7 @@ pub fn relaunch() -> Result<bool> {
 
 pub fn start() -> Result<()> {
     if !running() {
-        storage::command(std::env::current_exe()?)
-            .arg("--background")
-            .spawn()
+        process::spawn(storage::command(std::env::current_exe()?).arg("--background"))
             .context("Cannot start Multipapr")?;
     }
     Ok(())
@@ -100,7 +99,7 @@ impl ManagedChild {
             );
             job
         };
-        let mut child = command.spawn()?;
+        let mut child = process::spawn(command)?;
         if unsafe { AssignProcessToJobObject(job.0, child.as_raw_handle()) } == 0 {
             let error = io::Error::last_os_error();
             let _ = child.kill();
@@ -247,11 +246,11 @@ pub struct PlaybackReport {
     pub displays: BTreeMap<String, (PathBuf, String)>,
 }
 impl PlaybackReport {
-    pub fn switch_finished(&self, requested: SystemTime) -> bool {
+    pub fn layout_finished(&self, requested: SystemTime) -> bool {
         !self.loading
             && self
                 .layout_modified
-                .is_none_or(|modified| modified >= requested)
+                .is_some_and(|modified| modified >= requested)
     }
 
     fn record(&mut self, part: &Part, displays: &[Display], state: &str) {
@@ -264,25 +263,64 @@ impl PlaybackReport {
     }
 }
 
+pub fn wait_for_layout(modified: SystemTime) {
+    let Ok(dir) = storage::home() else {
+        return;
+    };
+    let report = dir.join("playback.json");
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while running() && Instant::now() < deadline {
+        if fs::read(&report)
+            .ok()
+            .and_then(|data| serde_json::from_slice::<PlaybackReport>(&data).ok())
+            .is_some_and(|report| report.layout_finished(modified))
+        {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
 struct Player {
     part: Part,
     started: Instant,
     still: Option<bool>,
-    process: ManagedChild,
+    playback: Option<MediaPlayback>,
     surface: Surface,
     pipe: PathBuf,
     desktop: Rect,
     covered: bool,
     pending_mapping: Option<String>,
+}
+
+struct MediaPlayback {
+    process: ManagedChild,
     work: tempfile::TempDir,
 }
+
 impl Player {
     fn open(part: &Part, settings: &Settings, displays: &[Display]) -> Result<Self> {
+        let black = part.media.as_os_str().is_empty();
         ensure!(
-            part.media.is_file(),
-            "Cannot find wallpaper {}",
-            part.media.display()
+            black || part.media.is_file(),
+            "{}",
+            part.missing_wallpaper(settings.multi)
         );
+        let desktop = part.desktop(displays);
+        let mut player = Self {
+            part: part.clone(),
+            started: Instant::now(),
+            still: black.then_some(true),
+            playback: None,
+            surface: Surface::create(desktop, black)?,
+            pipe: player_pipe(std::process::id(), settings.multi, part, displays),
+            desktop,
+            covered: false,
+            pending_mapping: None,
+        };
+        if black {
+            return Ok(player);
+        }
         let layout = Layout::new(displays, &settings.calibration);
         let dir = storage::home()?;
         let work = tempfile::Builder::new()
@@ -291,11 +329,9 @@ impl Player {
         let shader_path = work.path().join("layout.glsl");
         fs::write(&shader_path, shader::generate(displays, part))?;
         let profile = dir.join("playback.conf");
-        let desktop = part.desktop(displays);
-        let surface = Surface::create(desktop)?;
-        let pipe = player_pipe(std::process::id(), settings.multi, part, displays);
         let log = fs::File::create(work.path().join("mpv.log"))?;
-        let mut command = storage::command(storage::ensure_mpv()?);
+        let media = std::path::absolute(&part.media)?;
+        let mut command = storage::wallpaper_command(&media)?;
         command
             .current_dir(work.path())
             .args([
@@ -322,7 +358,7 @@ impl Player {
                 "--interpolation=no",
                 "--d3d11-flip=no",
             ])
-            .arg(format!("--wid={}", surface.hwnd as usize))
+            .arg(format!("--wid={}", player.surface.hwnd as usize))
             .arg(format!(
                 "--script={}",
                 dir.join("first-frame.lua").display()
@@ -333,36 +369,29 @@ impl Player {
                 "--glsl-shader-opts={}",
                 shader::parameters(&layout, settings, displays, part)
             ))
-            .arg(format!("--input-ipc-server={}", pipe.display()))
+            .arg(format!("--input-ipc-server={}", player.pipe.display()))
             .stdin(Stdio::null())
             .stdout(log.try_clone()?)
             .stderr(log)
             .arg("--msg-level=all=warn")
             .arg("--")
-            .arg(std::path::absolute(&part.media)?);
+            .arg(&media);
         let process = ManagedChild::spawn(&mut command).context("Cannot launch mpv")?;
-        Ok(Self {
-            part: part.clone(),
-            work,
-            started: Instant::now(),
-            still: None,
-            process,
-            surface,
-            pipe,
-            desktop,
-            covered: false,
-            pending_mapping: None,
-        })
+        player.playback = Some(MediaPlayback { process, work });
+        Ok(player)
     }
     fn check(&mut self) -> Result<()> {
-        if let Some(status) = self.process.child.try_wait()? {
-            let log = self.work.path().join("mpv.log");
+        let Some(playback) = self.playback.as_mut() else {
+            return Ok(());
+        };
+        if let Some(status) = playback.process.child.try_wait()? {
+            let log = playback.work.path().join("mpv.log");
             let name = format!("player-{}.log", self.part.displays[0]);
             fs::copy(log, storage::home()?.join(&name))?;
             anyhow::bail!("Player exited ({status}). See {name}");
         }
         if self.still.is_none() {
-            if let Ok(frame) = fs::read(self.work.path().join("first-frame")) {
+            if let Ok(frame) = fs::read(playback.work.path().join("first-frame")) {
                 self.still = match frame.as_slice() {
                     b"still" => Some(true),
                     b"video" => Some(false),
@@ -378,6 +407,9 @@ impl Player {
     }
     fn update(&mut self, covered: bool) -> Result<()> {
         self.surface.maintain(self.desktop)?;
+        if self.playback.is_none() {
+            return Ok(());
+        }
         if let Some(parameters) = &self.pending_mapping
             && update_mapping(&self.pipe, parameters).is_ok()
         {
@@ -475,32 +507,36 @@ pub fn run(mut show_editor: bool) -> Result<()> {
                     let changed = new_stamp != stamp || topology != displays;
                     let mut error = None;
                     if follow || changed {
-                        let mut settings = storage::load()?;
+                        let saved = storage::load()?;
+                        let mut settings = saved.clone();
+                        let layout = Layout::new(&displays, &settings.calibration);
+                        settings.restore_multi_wallpapers(&displays, &layout, Path::is_file);
                         if !editor.running() {
-                            let mut next = settings.clone();
-                            let layout = Layout::new(&displays, &next.calibration);
                             if let Ok(mut profiles) = storage::load_profiles() {
                                 let before = profiles.clone();
-                                follow_displays(&mut profiles, &mut next, &display_set(&displays));
+                                follow_displays(
+                                    &mut profiles,
+                                    &mut settings,
+                                    &display_set(&displays),
+                                );
                                 if profiles != before
                                     && let Err(e) = storage::save_profiles(&profiles)
                                 {
                                     error = Some(e.context("Cannot save profiles"));
                                 }
                             } else {
-                                next.display_set = display_set(&displays);
+                                settings.display_set = display_set(&displays);
                             }
-                            if !shader::plan(&next, &displays).is_empty() {
-                                layout.freeze(&displays, &mut next);
+                            if !shader::plan(&settings, &displays).is_empty() {
+                                layout.freeze(&displays, &mut settings);
                             }
-                            if next != settings && error.is_none() {
-                                if let Err(e) = storage::save("layout.json", &next) {
+                            if settings != saved && error.is_none() {
+                                if let Err(e) = storage::save("layout.json", &settings) {
                                     error = Some(e.context("Cannot save layout"));
                                 } else {
                                     new_stamp = version(&config);
                                 }
                             }
-                            settings = next;
                         }
                         current = Some(settings);
                         stamp = new_stamp;
@@ -578,9 +614,8 @@ pub fn run(mut show_editor: bool) -> Result<()> {
         }
     };
     if should_relaunch {
-        let child = storage::command(&exe)
-            .spawn()
-            .context("Cannot relaunch Multipapr")?;
+        let child =
+            process::spawn(&mut storage::command(&exe)).context("Cannot relaunch Multipapr")?;
         unsafe {
             AllowSetForegroundWindow(child.id());
         }

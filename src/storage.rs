@@ -2,6 +2,7 @@ use crate::{
     desktop::{Handle, make_int_resource, wide},
     displays,
     layout::{Display, Layout, Media, Profile, Settings},
+    process,
 };
 use anyhow::{Context, Result, ensure};
 use image::{DynamicImage, ImageFormat, ImageReader, imageops::FilterType};
@@ -28,9 +29,14 @@ const MPV_SETUP_MUTEX: &str = r"Local\Multipapr.MpvSetup.v1";
 const MPV_RESOURCE_ID: u16 = 101;
 const RT_RCDATA: u16 = 10;
 
+fn app_dir() -> Result<PathBuf> {
+    Ok(
+        PathBuf::from(env::var_os("LOCALAPPDATA").context("LOCALAPPDATA is unavailable")?)
+            .join("Multipapr"),
+    )
+}
 pub fn home() -> Result<PathBuf> {
-    let path = PathBuf::from(env::var_os("LOCALAPPDATA").context("LOCALAPPDATA is unavailable")?)
-        .join("Multipapr");
+    let path = app_dir()?;
     fs::create_dir_all(&path)?;
     Ok(path)
 }
@@ -39,10 +45,54 @@ pub fn command(name: impl AsRef<std::ffi::OsStr>) -> Command {
     cmd.creation_flags(CREATE_NO_WINDOW);
     cmd
 }
+pub fn wallpaper_dir() -> Result<PathBuf> {
+    Ok(app_dir()?.join("Wallpapers"))
+}
+
+pub fn in_wallpaper_dir(path: &Path, dir: &Path) -> bool {
+    path.parent().is_some_and(|parent| {
+        parent == dir || fs::canonicalize(dir).is_ok_and(|dir| dunce_path(&dir) == parent)
+    })
+}
+
+pub fn wallpaper_command(path: &Path) -> Result<Command> {
+    let managed = wallpaper_dir()?;
+    if in_wallpaper_dir(path, &managed) {
+        let demuxer = path
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("mp4"))
+            .then_some("mov");
+        return restricted_media_command(demuxer);
+    }
+    Ok(command(ensure_mpv()?))
+}
+
+pub fn restricted_media_command(demuxer: Option<&str>) -> Result<Command> {
+    Ok(media_command(ensure_mpv()?, demuxer))
+}
+
+pub fn preview_media_command(demuxer: Option<&str>) -> Result<Command> {
+    let mut cmd = media_command(mpv()?, demuxer);
+    cmd.args(["--cache-on-disk=no", "--save-position-on-quit=no"]);
+    Ok(cmd)
+}
+
+fn media_command(program: PathBuf, demuxer: Option<&str>) -> Command {
+    let mut cmd = command(program);
+    cmd.args(["--access-references=no", "--autoload-files=no", "--no-ytdl"]);
+    if let Some(demuxer) = demuxer {
+        cmd.args([
+            "--demuxer=lavf",
+            &format!("--demuxer-lavf-format={demuxer}"),
+        ]);
+    }
+    cmd
+}
+
 fn mpv_dir() -> Result<PathBuf> {
-    let tools = home()?.join("tools");
-    fs::create_dir_all(&tools)?;
-    Ok(tools.join(concat!("mpv-", env!("MPV_BUILD"))))
+    Ok(app_dir()?
+        .join("tools")
+        .join(concat!("mpv-", env!("MPV_BUILD"))))
 }
 pub fn mpv() -> Result<PathBuf> {
     let mut paths = vec![
@@ -107,7 +157,7 @@ pub fn ensure_mpv() -> Result<PathBuf> {
 }
 pub fn warm_up_mpv() {
     if let Ok(mpv) = ensure_mpv() {
-        let _ = command(mpv).arg("--version").output();
+        let _ = process::decoder_output(command(mpv).arg("--version"));
     }
 }
 fn unpack(bundle: &[u8], dest: &Path) -> Result<()> {
@@ -242,9 +292,15 @@ fn parse_mpv_dimensions(stdout: &[u8]) -> Option<(u32, u32)> {
     let text = String::from_utf8_lossy(stdout);
     text.lines().find_map(|line| {
         let (_, rest) = line.split_once("MULTIPAPR:")?;
-        let (w, h) = rest.trim().split_once(':')?;
-        let (w, h) = (w.parse::<u32>().ok()?, h.parse::<u32>().ok()?);
-        (w > 0 && h > 0).then_some((w, h))
+        let mut values = rest.trim().split(':');
+        let w = values.next()?.parse::<u32>().ok()?;
+        let h = values.next()?.parse::<u32>().ok()?;
+        let rotation = values
+            .next()
+            .and_then(|value| value.parse::<u32>().ok())
+            .unwrap_or(0);
+        let size = if rotation % 180 == 90 { (h, w) } else { (w, h) };
+        (w > 0 && h > 0).then_some(size)
     })
 }
 fn probe_with_mpv(path: &Path) -> Result<(u32, u32)> {
@@ -252,7 +308,8 @@ fn probe_with_mpv(path: &Path) -> Result<(u32, u32)> {
     let temp = tempfile::tempdir_in(&dir)?;
     let script = temp.path().join("probe.lua");
     fs::write(&script, include_bytes!("../assets/probe.lua"))?;
-    let out = command(ensure_mpv()?)
+    let mut command = wallpaper_command(path)?;
+    command
         .args([
             "--no-config",
             "--terminal=yes",
@@ -270,28 +327,54 @@ fn probe_with_mpv(path: &Path) -> Result<(u32, u32)> {
         .arg(format!("--script={}", script.display()))
         .arg(format!("--vo-image-outdir={}", temp.path().display()))
         .arg("--")
-        .arg(path)
-        .output()
-        .context("Cannot probe media with mpv")?;
-    let size = parse_mpv_dimensions(&out.stdout).context("Cannot read this media file")?;
+        .arg(path);
+    let out = process::decoder_output(&command).context("Cannot probe media with mpv")?;
+    let size = parse_mpv_dimensions(&out).context("Cannot read this media file")?;
     if let Some(frame) = fs::read_dir(temp.path())?
         .filter_map(|e| e.ok().map(|e| e.path()))
         .find(|p| p.extension().and_then(|e| e.to_str()) == Some("jpg"))
     {
-        fs::rename(frame, preview_path(path, &dir)?)?;
+        fs::rename(frame, preview_path(path)?)?;
     }
     Ok(size)
 }
-fn preview_path(media: &Path, dir: &Path) -> Result<PathBuf> {
+pub fn preview_path(media: &Path) -> Result<PathBuf> {
+    let home = app_dir()?;
+    let library = home.join("Wallpapers");
+    let dir = if in_wallpaper_dir(media, &library) {
+        &library
+    } else {
+        &home
+    };
+    preview_path_in(media, dir)
+}
+
+fn preview_path_in(media: &Path, dir: &Path) -> Result<PathBuf> {
     use std::hash::{DefaultHasher, Hash, Hasher};
     let mut hash = DefaultHasher::new();
     media.hash(&mut hash);
     fs::metadata(media)?.modified()?.hash(&mut hash);
     Ok(dir.join(format!("preview-{:016x}.jpg", hash.finish())))
 }
-pub fn probe(path: &Path) -> Result<Media> {
+pub fn still_image(path: &Path) -> bool {
+    ImageReader::open(path)
+        .and_then(ImageReader::with_guessed_format)
+        .is_ok_and(|reader| {
+            reader
+                .format()
+                .is_some_and(|format| format != ImageFormat::Gif)
+        })
+}
+pub fn canonical_path(path: &Path) -> Result<PathBuf> {
     let path = fs::canonicalize(path).context("Cannot open the selected file")?;
-    let path = std::path::absolute(dunce_path(&path))?;
+    Ok(std::path::absolute(dunce_path(&path))?)
+}
+
+fn probe_media(
+    path: &Path,
+    probe_video: impl FnOnce(&Path) -> Result<(u32, u32)>,
+) -> Result<Media> {
+    let path = canonical_path(path)?;
     if let Ok(reader) = ImageReader::open(&path).and_then(|r| r.with_guessed_format())
         && let Ok((w, h)) = reader.into_dimensions()
         && w > 0
@@ -303,12 +386,38 @@ pub fn probe(path: &Path) -> Result<Media> {
             height: h,
         });
     }
-    let (w, h) = probe_with_mpv(&path)?;
+    let (w, h) = probe_video(&path)?;
     ensure!(w > 0 && h > 0, "Invalid source dimensions");
     Ok(Media {
         path,
         width: w,
         height: h,
+    })
+}
+
+pub fn probe(path: &Path) -> Result<Media> {
+    probe_media(path, probe_with_mpv)
+}
+
+pub fn probe_read_only(path: &Path) -> Result<Media> {
+    probe_media(path, |path| {
+        let mut command = preview_media_command(None)?;
+        command
+            .args([
+                "--no-config",
+                "--terminal=yes",
+                "--input-terminal=no",
+                "--vo=null",
+                "--no-audio",
+                "--no-sub",
+                "--vd-lavc-o=max_pixels=33177600",
+                "--frames=1",
+                "--term-status-msg=MULTIPAPR:${video-params/dw}:${video-params/dh}:${video-params/rotate}",
+                "--",
+            ])
+            .arg(path);
+        let output = process::decoder_output(&command).context("Cannot inspect media with mpv")?;
+        parse_mpv_dimensions(&output).context("Cannot read this media file")
     })
 }
 fn dunce_path(path: &Path) -> PathBuf {
@@ -321,11 +430,17 @@ fn dunce_path(path: &Path) -> PathBuf {
         .unwrap_or_else(|| path.into())
 }
 pub fn preview(media: &Media) -> Result<image::RgbaImage> {
-    preview_in(media, &home()?)
+    preview_at(media, &preview_path(&media.path)?, true)
 }
+pub fn preview_read_only(media: &Media) -> Result<image::RgbaImage> {
+    preview_at(media, &preview_path(&media.path)?, false)
+}
+#[cfg(test)]
 fn preview_in(media: &Media, dir: &Path) -> Result<image::RgbaImage> {
-    let path = preview_path(&media.path, dir)?;
-    if let Ok(image) = image::open(&path) {
+    preview_at(media, &preview_path_in(&media.path, dir)?, true)
+}
+fn preview_at(media: &Media, path: &Path, cache: bool) -> Result<image::RgbaImage> {
+    if let Ok(image) = image::open(path) {
         return Ok(image.into_rgba8());
     }
     let decoded = ImageReader::open(&media.path)?
@@ -337,8 +452,23 @@ fn preview_in(media: &Media, dir: &Path) -> Result<image::RgbaImage> {
     } else {
         decoded
     };
-    let _ = DynamicImage::ImageRgb8(scaled.to_rgb8()).save_with_format(&path, ImageFormat::Jpeg);
+    if cache {
+        let _ = DynamicImage::ImageRgb8(scaled.to_rgb8()).save_with_format(path, ImageFormat::Jpeg);
+    }
     Ok(scaled.into_rgba8())
+}
+
+pub fn cache_preview(media: &Media, image: &image::RgbaImage) -> Result<()> {
+    let path = preview_path(&media.path)?;
+    let temp = tempfile::NamedTempFile::new_in(path.parent().context("Invalid preview path")?)?;
+    DynamicImage::ImageRgba8(image.clone())
+        .into_rgb8()
+        .save_with_format(temp.path(), ImageFormat::Jpeg)?;
+    match temp.persist_noclobber(path) {
+        Ok(_) => Ok(()),
+        Err(err) if err.error.kind() == io::ErrorKind::AlreadyExists => Ok(()),
+        Err(err) => Err(err.error.into()),
+    }
 }
 const RUN: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
 pub fn startup_enabled() -> bool {

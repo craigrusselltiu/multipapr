@@ -2,8 +2,11 @@
 mod desktop;
 mod displays;
 mod editor;
+mod gallery;
 mod host;
+mod http;
 mod layout;
+mod process;
 mod shader;
 mod storage;
 mod tray;
@@ -32,7 +35,7 @@ fn run() -> Result<()> {
             let file = args
                 .next()
                 .context("Usage: multipapr --apply <media path>")?;
-            let media = storage::probe(Path::new(&file))?;
+            let media = gallery::import(Path::new(&file))?.saved.media;
             let previous = storage::load_optional()?;
             let mut profiles = storage::load_profiles().ok();
             let first = previous.as_ref().is_none_or(layout::Settings::is_empty)

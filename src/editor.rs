@@ -1,6 +1,8 @@
 mod canvas;
 mod chrome;
+mod gallery;
 mod icons;
+mod popup;
 mod preferences;
 use crate::{
     displays, host,
@@ -18,7 +20,8 @@ use eframe::egui::{self, *};
 use icons::Icon;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
-    path::PathBuf,
+    io,
+    path::{Path, PathBuf},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -106,11 +109,18 @@ fn proportional_size(panel: World, ratio: f32) -> [f32; 2] {
     [panel.w * ratio, panel.h * ratio]
 }
 
-struct Imported {
-    media: Media,
-    image: image::RgbaImage,
+struct PendingImport {
+    key: Option<gallery::CardKey>,
+    targets: Vec<(Option<String>, World)>,
+    result: Receiver<Result<crate::gallery::PreparedWallpaper>>,
 }
-type ImportResult = Receiver<Result<Imported>>;
+
+#[derive(Clone, Copy)]
+struct PlaybackTransition {
+    requested: SystemTime,
+    mode_switch: bool,
+}
+
 struct HistoryStep {
     settings: Settings,
     framings: BTreeMap<String, Framing>,
@@ -159,14 +169,17 @@ struct Editor {
     textures: HashMap<PathBuf, TextureHandle>,
     loading: HashMap<PathBuf, Receiver<Result<image::RgbaImage>>>,
     failed: HashSet<PathBuf>,
-    pending: HashMap<Option<String>, (World, ImportResult)>,
+    pending: Vec<PendingImport>,
     login: bool,
+    gallery: gallery::Gallery,
+    gallery_open: bool,
     popup: Option<preferences::SettingsPopup>,
+    closing_popup: Option<popup::ClosingPopup>,
     update: preferences::UpdateState,
     message: String,
     last_check: Instant,
     last_playback_check: Instant,
-    mode_switch: Option<SystemTime>,
+    playback_transition: Option<PlaybackTransition>,
     playback_error: Option<String>,
     playback: Option<host::PlaybackReport>,
     undo: Vec<HistoryStep>,
@@ -223,6 +236,7 @@ impl Editor {
         } else {
             settings.display_set = set;
         }
+        settings.restore_multi_wallpapers(&displays, &layout, Path::is_file);
         if playing(&settings, &displays) {
             layout.freeze(&displays, &mut settings);
         }
@@ -294,14 +308,17 @@ impl Editor {
             textures: HashMap::new(),
             loading: HashMap::new(),
             failed: HashSet::new(),
-            pending: HashMap::new(),
+            pending: Vec::new(),
             login,
+            gallery: gallery::Gallery::default(),
+            gallery_open: false,
             popup: None,
+            closing_popup: None,
             update: preferences::UpdateState::default(),
             message: String::new(),
             last_check: Instant::now(),
             last_playback_check: Instant::now(),
-            mode_switch: None,
+            playback_transition: None,
             playback_error: None,
             playback: None,
             undo: Vec::new(),
@@ -356,16 +373,13 @@ impl Editor {
             l.bounds.union(l.media(&self.settings, w))
         };
     }
-    fn set_multi(&mut self, on: bool) {
+    fn set_multi(&mut self, on: bool, available: impl Fn(&Path) -> bool) {
         self.settings.multi = on;
-        if on {
-            let span = &self.settings.wallpaper;
-            for d in &self.displays {
-                self.settings
-                    .screens
-                    .entry(d.id.clone())
-                    .or_insert_with(|| span.clone());
-            }
+        let layout = self.layout();
+        self.settings
+            .restore_multi_wallpapers(&self.displays, &layout, available);
+        if self.message.starts_with("Missing ") {
+            self.message.clear();
         }
         self.reframe();
     }
@@ -375,26 +389,115 @@ impl Editor {
             .then(|| self.displays[self.selected].id.clone())
     }
     fn importing_selected(&self) -> bool {
-        self.pending.contains_key(&self.import_target())
+        let selected = self.import_target();
+        self.pending
+            .iter()
+            .any(|job| job.targets.iter().any(|(target, _)| target == &selected))
+    }
+    fn cancel_import(&mut self, target: &Option<String>) {
+        for job in &mut self.pending {
+            job.targets.retain(|(previous, _)| previous != target);
+        }
+    }
+    fn clear_wallpaper(&mut self) {
+        self.cancel_import(&self.import_target());
+        if !self.wallpaper().is_empty() {
+            self.wallpaper_mut().clear();
+            self.message.clear();
+            self.reframe();
+        }
+    }
+    fn forget_gallery_wallpapers(&mut self, matches: impl Fn(&Path) -> bool) {
+        let reframe = matches(&self.wallpaper().media.path);
+        self.settings.clear_wallpapers(&matches);
+        for profile in &mut self.profiles {
+            self.profiles_dirty |= profile.clear_wallpapers(&matches);
+        }
+        for step in self
+            .undo
+            .iter_mut()
+            .chain(&mut self.redo)
+            .chain(std::iter::once(&mut self.committed))
+        {
+            if matches(&step.settings.wallpaper.media.path) {
+                step.framings.clear();
+            }
+            step.settings.clear_wallpapers(&matches);
+        }
+        if reframe {
+            self.message.clear();
+            self.reframe();
+        }
+    }
+    fn remove_from_gallery(&mut self, ctx: &Context, path: Option<PathBuf>) {
+        if self.gallery.removing() {
+            return;
+        }
+        let dir = match storage::wallpaper_dir() {
+            Ok(dir) => dir,
+            Err(error) => {
+                self.gallery.set_error(error.to_string());
+                return;
+            }
+        };
+        let matches = |assigned: &Path| match &path {
+            Some(path) => path == assigned,
+            None => storage::in_wallpaper_dir(assigned, &dir),
+        };
+        self.forget_gallery_wallpapers(matches);
+        self.persist();
+        if self.settings != self.saved || self.profiles_dirty {
+            self.gallery.set_error(self.message.clone());
+            return;
+        }
+        let after = std::fs::metadata(dir.with_file_name("layout.json"))
+            .and_then(|info| info.modified())
+            .ok();
+        self.gallery.remove(ctx, path, after);
     }
     fn import(&mut self, path: PathBuf, ctx: &Context) {
-        let target = self.import_target();
-        let (tx, rx) = channel();
-        self.pending
-            .insert(target, (self.target(&self.layout()), rx));
-        self.message = if storage::mpv().is_err() {
-            "Running first-time setup…".into()
+        self.import_from(ctx, self.import_target(), None, move || {
+            crate::gallery::import(&path)
+        });
+    }
+    fn import_from(
+        &mut self,
+        ctx: &Context,
+        target: Option<String>,
+        key: Option<gallery::CardKey>,
+        prepare: impl FnOnce() -> Result<crate::gallery::PreparedWallpaper> + Send + 'static,
+    ) {
+        if self.gallery.removing() {
+            self.message = "Wait for the Gallery to finish deleting wallpapers.".into();
+            return;
+        }
+        let layout = self.layout();
+        let frame = if let Some(id) = &target {
+            let Some(index) = self.displays.iter().position(|display| &display.id == id) else {
+                return;
+            };
+            layout.panels[index]
         } else {
-            String::new()
+            layout.bounds
         };
+        self.cancel_import(&target);
+        self.message.clear();
+        self.gallery.clear_error();
+        if key.is_some()
+            && let Some(job) = self.pending.iter_mut().find(|job| job.key == key)
+        {
+            job.targets.push((target, frame));
+            return;
+        }
+        let (tx, rx) = channel();
+        self.pending.push(PendingImport {
+            key,
+            targets: vec![(target, frame)],
+            result: rx,
+        });
         let ctx = ctx.clone();
         std::thread::spawn(move || {
-            let result = (|| {
-                let media = storage::probe(&path)?;
-                let image = storage::preview(&media)?;
-                Ok(Imported { media, image })
-            })();
-            let _ = tx.send(result);
+            let _ = tx.send(prepare());
             ctx.request_repaint();
         });
     }
@@ -413,52 +516,96 @@ impl Editor {
     }
     fn collect(&mut self, ctx: &Context) {
         let mut completed = Vec::new();
-        self.pending.retain(|target, (frame, rx)| {
-            let result = match rx.try_recv() {
+        self.pending.retain_mut(|job| {
+            let result = match job.result.try_recv() {
                 Ok(result) => result,
                 Err(TryRecvError::Empty) => return true,
                 Err(TryRecvError::Disconnected) => Err(anyhow::anyhow!("Wallpaper import stopped")),
             };
-            completed.push((target.clone(), *frame, result));
+            completed.push((job.key.take(), std::mem::take(&mut job.targets), result));
             false
         });
-        for (target, original_frame, result) in completed {
+        for (key, targets, result) in completed {
             match result {
                 Ok(i) => {
+                    let media = i.saved.media.clone();
+                    self.gallery.record_saved(i.saved);
+                    if targets.is_empty() {
+                        continue;
+                    }
+                    if !self.settings.multi
+                        && targets.iter().any(|(target, _)| target.is_none())
+                        && let Some(key) = &key
+                    {
+                        self.gallery.finish_span_apply(ctx, key);
+                    }
                     self.message.clear();
-                    self.loading.remove(&i.media.path);
-                    self.failed.remove(&i.media.path);
+                    self.loading.remove(&media.path);
+                    self.failed.remove(&media.path);
                     self.textures
-                        .insert(i.media.path.clone(), texture(ctx, &i.image));
+                        .insert(media.path.clone(), texture(ctx, &i.image));
                     let layout = self.layout();
-                    let selected = target == self.import_target();
-                    let span = &self.settings.wallpaper;
-                    let (w, frame) = match target {
-                        Some(id) => {
-                            let frame = self
-                                .displays
-                                .iter()
-                                .position(|d| d.id == id)
-                                .map_or(original_frame, |k| layout.panels[k]);
-                            let w = self
-                                .settings
-                                .screens
-                                .entry(id)
-                                .or_insert_with(|| span.clone());
-                            (w, frame)
-                        }
-                        None => (&mut self.settings.wallpaper, layout.bounds),
-                    };
-                    w.media = i.media;
-                    w.fill(frame);
+                    let pitch = layout.pitch(&self.settings);
+                    let selected = self.import_target();
+                    let reframe = targets.iter().any(|(target, _)| target == &selected);
+                    for (target, original_frame) in targets {
+                        let (w, frame) = match target {
+                            Some(id) => {
+                                let frame = self
+                                    .displays
+                                    .iter()
+                                    .position(|d| d.id == id)
+                                    .map_or(original_frame, |index| layout.panels[index]);
+                                let span = &self.settings.wallpaper;
+                                (
+                                    self.settings
+                                        .screens
+                                        .entry(id)
+                                        .or_insert_with(|| span.clone()),
+                                    frame,
+                                )
+                            }
+                            None => (&mut self.settings.wallpaper, layout.bounds),
+                        };
+                        w.media = media.clone();
+                        w.cover(pitch, frame);
+                    }
                     layout.freeze(&self.displays, &mut self.settings);
-                    if selected {
+                    if reframe {
                         self.reframe();
                     }
                 }
-                Err(e) => self.message = format!("{e:#}"),
+                Err(e) if e.is::<crate::gallery::UnavailableWallpaper>() => {
+                    if let Some(key) = &key {
+                        self.gallery.omit_unavailable(key);
+                    }
+                }
+                Err(e) if !targets.is_empty() => {
+                    let message = if is_missing_file(&e) {
+                        let display = targets[0].0.as_ref().and_then(|id| {
+                            self.displays.iter().position(|display| &display.id == id)
+                        });
+                        shader::missing_wallpaper(display, None)
+                    } else {
+                        format!("{e:#}")
+                    };
+                    if key.is_some() {
+                        self.gallery.set_error(message.clone());
+                        if is_missing_file(&e) {
+                            self.gallery.refresh_saved(ctx);
+                        }
+                    }
+                    self.message = message;
+                }
+                Err(_) => {}
             }
         }
+    }
+    fn missing_preview(&self, path: &Path) -> Option<String> {
+        shader::plan(&self.settings, &self.displays)
+            .into_iter()
+            .find(|part| part.media == path)
+            .map(|part| part.missing_wallpaper(self.settings.multi))
     }
     fn load_previews(&mut self, ctx: &Context) {
         let wanted: Vec<_> = self
@@ -473,6 +620,7 @@ impl Editor {
         self.failed
             .retain(|path| wanted.iter().any(|m| m.path == *path));
         let (textures, failed, message) = (&mut self.textures, &mut self.failed, &mut self.message);
+        let mut missing = None;
         self.loading.retain(|path, rx| match rx.try_recv() {
             Ok(Ok(image)) => {
                 textures.insert(path.clone(), texture(ctx, &image));
@@ -480,12 +628,21 @@ impl Editor {
             }
             Ok(Err(e)) => {
                 failed.insert(path.clone());
-                *message = format!("{e:#}");
+                if is_missing_file(&e) {
+                    missing = Some(path.clone());
+                } else {
+                    *message = format!("{e:#}");
+                }
                 false
             }
             Err(TryRecvError::Empty) => true,
             Err(TryRecvError::Disconnected) => false,
         });
+        if let Some(path) = missing
+            && let Some(message) = self.missing_preview(&path)
+        {
+            self.message = message;
+        }
         for media in wanted {
             let path = &media.path;
             if path.as_os_str().is_empty()
@@ -499,9 +656,7 @@ impl Editor {
             self.loading.insert(path.clone(), rx);
             let ctx = ctx.clone();
             std::thread::spawn(move || {
-                let image = storage::preview(&media).or_else(|_| {
-                    storage::probe(&media.path).and_then(|media| storage::preview(&media))
-                });
+                let image = crate::gallery::saved_thumbnail(&media);
                 let _ = tx.send(image);
                 ctx.request_repaint();
             });
@@ -542,6 +697,8 @@ impl Editor {
             self.undo.clear();
             self.redo.clear();
         }
+        self.settings
+            .restore_multi_wallpapers(&self.displays, &layout, Path::is_file);
         if playing(&self.settings, &self.displays) {
             layout.freeze(&self.displays, &mut self.settings);
         }
@@ -612,9 +769,14 @@ impl Editor {
                 ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
                     let changed =
                         preferences::toggle_switch(ui, &mut multi, "Multi-mode").changed();
-                    if self.mode_switch.is_some() {
+                    if let Some(transition) = self.playback_transition {
+                        let hint = if transition.mode_switch {
+                            "Switching wallpaper layout…"
+                        } else {
+                            "Applying wallpaper…"
+                        };
                         ui.add(Spinner::new().size(16.).color(ACCENT))
-                            .on_hover_text("Switching wallpaper layout…");
+                            .on_hover_text(hint);
                     }
                     changed
                 })
@@ -622,7 +784,7 @@ impl Editor {
             })
             .inner;
         if switched {
-            self.set_multi(multi);
+            self.set_multi(multi, Path::is_file);
             ui.ctx().request_repaint();
         }
         ui.add_space(2.);
@@ -705,12 +867,12 @@ impl Editor {
         section_heading(ui, "Wallpaper", detail);
         self.file_field(ui);
         let has = !self.wallpaper().is_empty();
-        ui.add_enabled_ui(has, |ui| {
-            ui.horizontal(|ui| {
-                let button_size = vec2(
-                    (ui.available_width() - ui.spacing().item_spacing.x) * 0.5,
-                    30.,
-                );
+        ui.horizontal(|ui| {
+            let button_size = vec2(
+                (ui.available_width() - 2. * ui.spacing().item_spacing.x) / 3.,
+                30.,
+            );
+            ui.add_enabled_ui(has, |ui| {
                 if ui
                     .add_sized(button_size, Button::new("Fill"))
                     .on_hover_text("Use the wallpaper’s native size")
@@ -736,8 +898,22 @@ impl Editor {
                     self.reframe();
                 }
             });
+            let clear_hint = if self.settings.multi {
+                "Clear this display’s wallpaper"
+            } else {
+                "Clear the spanning wallpaper"
+            };
+            ui.add_enabled_ui(has || self.importing_selected(), |ui| {
+                if ui
+                    .add_sized(button_size, Button::new("Clear"))
+                    .on_hover_text(clear_hint)
+                    .clicked()
+                {
+                    self.clear_wallpaper();
+                }
+            });
         });
-        if has {
+        if !self.wallpaper().is_empty() {
             let media = self.wallpaper().media.clone();
             resolution(ui, media.width, media.height);
             let mut percent = self.wallpaper().scale * 100.;
@@ -800,10 +976,15 @@ impl Editor {
                 heading_font(13.),
                 TEXT,
             );
+            let detail = if self.settings.multi && self.settings.shown(&d.id).is_empty() {
+                "No wallpaper".to_owned()
+            } else {
+                format!("{} × {} px", d.px.w as u32, d.px.h as u32)
+            };
             label_draw.text(
                 pos2(left, rect.center().y + 9.),
                 Align2::LEFT_CENTER,
-                format!("{} × {} px", d.px.w as u32, d.px.h as u32),
+                detail,
                 FontId::proportional(12.),
                 MUTED,
             );
@@ -969,7 +1150,7 @@ impl Editor {
             .into_iter()
             .find(|p| !p.media.is_file())
         {
-            self.message = format!("Can’t find {}", missing.media.display());
+            self.message = missing.missing_wallpaper(next.multi);
             return false;
         }
         self.remember_current();
@@ -982,7 +1163,7 @@ impl Editor {
         self.redo.clear();
         self.edit_focus = None;
         self.committed = HistoryStep::new(&self.settings, &self.profiles);
-        self.pending.clear();
+        self.pending.iter_mut().for_each(|job| job.targets.clear());
         self.message.clear();
         self.reframe();
     }
@@ -1198,7 +1379,7 @@ impl Editor {
         }
         self.committed = HistoryStep::new(&self.settings, &self.profiles);
         self.edit_focus = None;
-        self.pending.clear();
+        self.pending.iter_mut().for_each(|job| job.targets.clear());
         if reframe {
             self.reframe();
         }
@@ -1238,6 +1419,9 @@ impl Editor {
             ctx.request_repaint_after(interval);
         } else if !dragging && (self.settings != self.saved || self.profiles_dirty) {
             self.persist();
+            if self.playback_transition.is_some() {
+                ctx.request_repaint();
+            }
         }
     }
 
@@ -1267,20 +1451,23 @@ impl Editor {
                 {
                     self.message = e.to_string();
                 }
-                if self.saved.multi != self.settings.multi {
-                    self.mode_switch = if host::running()
-                        && (playing(&self.settings, &self.displays)
-                            || playing(&self.saved, &self.displays))
-                    {
-                        storage::home().ok().and_then(|dir| {
-                            std::fs::metadata(dir.join("layout.json"))
-                                .ok()?
-                                .modified()
+                let before = shader::plan(&self.saved, &self.displays);
+                let after = shader::plan(&self.settings, &self.displays);
+                let mode_switch = self.saved.multi != self.settings.multi;
+                if mode_switch || before != after {
+                    self.playback_transition =
+                        if !(before.is_empty() && after.is_empty()) && host::running() {
+                            storage::home()
                                 .ok()
-                        })
-                    } else {
-                        None
-                    };
+                                .and_then(|dir| std::fs::metadata(dir.join("layout.json")).ok())
+                                .and_then(|info| info.modified().ok())
+                                .map(|requested| PlaybackTransition {
+                                    requested,
+                                    mode_switch,
+                                })
+                        } else {
+                            None
+                        };
                 }
                 self.saved = self.settings.clone();
             }
@@ -1291,6 +1478,11 @@ impl Editor {
 impl eframe::App for Editor {
     fn update(&mut self, ctx: &Context, _: &mut eframe::Frame) {
         self.collect(ctx);
+        for path in self.gallery.poll_storage(ctx) {
+            self.textures.remove(&path);
+            self.loading.remove(&path);
+            self.failed.remove(&path);
+        }
         self.load_previews(ctx);
         self.poll_update(ctx);
         if self.last_check.elapsed() >= Duration::from_secs(3) {
@@ -1301,7 +1493,7 @@ impl eframe::App for Editor {
             }
             self.last_check = Instant::now();
         }
-        let poll_interval = if self.mode_switch.is_some() {
+        let poll_interval = if self.playback_transition.is_some() {
             Duration::from_millis(100)
         } else {
             Duration::from_secs(3)
@@ -1318,20 +1510,21 @@ impl eframe::App for Editor {
                     self.host
                         .map_or_else(host::running, |pid| pid == report.host)
                 });
-            if let Some(requested) = self.mode_switch
+            if let Some(transition) = self.playback_transition
                 && (self.playback_error.is_some()
                     || !host::running()
                     || self
                         .playback
                         .as_ref()
-                        .is_some_and(|report| report.switch_finished(requested)))
+                        .is_some_and(|report| report.layout_finished(transition.requested)))
             {
-                self.mode_switch = None;
+                self.playback_transition = None;
             }
             self.last_playback_check = Instant::now();
         }
         ctx.request_repaint_after(poll_interval);
         if self.popup.is_none()
+            && self.closing_popup.is_none()
             && let Some(path) =
                 ctx.input(|i| i.raw.dropped_files.first().and_then(|f| f.path.clone()))
         {
@@ -1344,8 +1537,17 @@ impl eframe::App for Editor {
             !self.undo.is_empty(),
             !self.redo.is_empty(),
             self.profiles_open,
+            self.gallery_open,
         );
-        if actions.profiles {
+        let modal_open = self.popup.is_some() || self.gallery_open || self.closing_popup.is_some();
+        let gallery_opening = actions.gallery && !modal_open;
+        if gallery_opening {
+            self.gallery_open = true;
+            self.profiles_open = false;
+            self.profile_name = None;
+            self.drag = None;
+        }
+        if actions.profiles && !modal_open && !gallery_opening {
             self.profiles_open = !self.profiles_open;
             self.profile_name = None;
         }
@@ -1353,7 +1555,7 @@ impl eframe::App for Editor {
             .memory(|m| m.focused())
             .is_some_and(|id| text_edit::TextEditState::load(ctx, id).is_some());
         let (mut undo, mut redo) = (actions.undo, actions.redo);
-        if self.popup.is_none() && !typing {
+        if !modal_open && !gallery_opening && !typing {
             let shortcut = |modifiers, key| KeyboardShortcut::new(modifiers, key);
             ctx.input_mut(|i| {
                 redo |= i
@@ -1362,7 +1564,7 @@ impl eframe::App for Editor {
                 undo |= i.consume_shortcut(&shortcut(Modifiers::COMMAND, Key::Z));
             });
         }
-        if !ctx.input(|i| i.pointer.any_down()) {
+        if !modal_open && !gallery_opening && !ctx.input(|i| i.pointer.any_down()) {
             if undo {
                 self.step(true);
             } else if redo {
@@ -1375,13 +1577,52 @@ impl eframe::App for Editor {
         }
         self.sync(ctx);
         self.record(ctx);
-        if actions.settings && self.popup.is_none() {
+        if actions.settings && !modal_open && !gallery_opening {
             self.profiles_open = false;
             self.popup = Some(preferences::SettingsPopup::default());
             self.update.start_check(ctx);
+            self.gallery.refresh_saved(ctx);
         }
-        if self.popup.is_some() {
-            self.show_preferences(ctx);
+        let opacity = popup::opacity(ctx, self.popup.is_some() || self.gallery_open);
+        if opacity > 0. {
+            preferences::blur_backdrop(ctx, opacity);
+        }
+        if let Some(closing) = &self.closing_popup {
+            if opacity > 0. {
+                closing.show(ctx, opacity);
+            } else {
+                self.closing_popup = None;
+            }
+        } else if self.popup.is_some() {
+            self.show_preferences(ctx, opacity);
+        } else if self.gallery_open {
+            let downloading: HashSet<_> = self
+                .pending
+                .iter()
+                .filter_map(|job| job.key.as_ref())
+                .collect();
+            let view = gallery::View {
+                displays: &self.displays,
+                selected: self.selected,
+                multi: self.settings.multi,
+                downloading: &downloading,
+                importing_local: self.pending.iter().any(|job| job.key.is_none()),
+            };
+            match self.gallery.show(ctx, gallery_opening, opacity, view) {
+                gallery::Action::None => {}
+                gallery::Action::Close => {
+                    self.closing_popup =
+                        popup::ClosingPopup::capture(ctx, Id::new(gallery::DIALOG_ID), opacity);
+                    self.gallery_open = false;
+                    ctx.memory_mut(|memory| memory.request_focus(actions.gallery_id));
+                    ctx.request_repaint();
+                }
+                gallery::Action::Apply(item, target) => {
+                    let key = Some(item.key());
+                    self.import_from(ctx, target, key, move || item.prepare());
+                }
+                gallery::Action::Delete(path) => self.remove_from_gallery(ctx, Some(path)),
+            }
         }
     }
     fn on_exit(&mut self, _: Option<&eframe::glow::Context>) {
@@ -1391,6 +1632,14 @@ impl eframe::App for Editor {
         self.update.cancel();
     }
 }
+
+fn is_missing_file(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<io::Error>()
+            .is_some_and(|error| error.kind() == io::ErrorKind::NotFound)
+    })
+}
 pub fn open() -> Result<()> {
     let exe = std::env::current_exe()?;
     update::cleanup_old_executables();
@@ -1398,13 +1647,7 @@ pub fn open() -> Result<()> {
         std::thread::spawn(storage::warm_up_mpv);
     }
     let displays = displays::detect()?;
-    let settings = storage::load_optional()?.unwrap_or_else(|| {
-        Settings::new(Media {
-            path: PathBuf::new(),
-            width: 1920,
-            height: 1080,
-        })
-    });
+    let settings = storage::load_optional()?.unwrap_or_else(|| Settings::new(Media::default()));
     let profiles = storage::load_profiles();
     let preferences = storage::load_preferences();
     let exit = Arc::new(ExitState::new(preferences.close_to_tray));

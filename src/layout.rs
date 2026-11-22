@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Clone, Copy, Default, Debug, PartialEq, Serialize)]
 pub struct Rect {
@@ -66,6 +66,16 @@ pub struct Media {
     pub width: u32,
     pub height: u32,
 }
+
+impl Default for Media {
+    fn default() -> Self {
+        Self {
+            path: PathBuf::new(),
+            width: 1920,
+            height: 1080,
+        }
+    }
+}
 #[derive(Clone, Copy, Default, Debug, PartialEq, Serialize, Deserialize)]
 #[repr(u8)]
 #[serde(rename_all = "snake_case")]
@@ -119,6 +129,16 @@ impl Wallpaper {
     }
     pub fn is_empty(&self) -> bool {
         self.media.path.as_os_str().is_empty()
+    }
+    pub fn clear(&mut self) {
+        *self = Self::new(Media::default());
+    }
+    pub fn clear_if(&mut self, matches: &impl Fn(&Path) -> bool) -> bool {
+        if self.is_empty() || !matches(&self.media.path) {
+            return false;
+        }
+        self.clear();
+        true
     }
     pub fn rect(&self, pitch: f32) -> Rect {
         let w = self.media.width as f32 * pitch * self.scale * self.stretch;
@@ -179,6 +199,56 @@ impl Settings {
             _ => &self.wallpaper,
         }
     }
+    pub fn restore_multi_wallpapers(
+        &mut self,
+        displays: &[Display],
+        layout: &Layout,
+        available: impl Fn(&Path) -> bool,
+    ) {
+        if !self.multi {
+            return;
+        }
+        self.wallpaper.clear_if(&|path| !available(path));
+        let pitch = layout.pitch(self);
+        for (display, panel) in displays.iter().zip(&layout.panels) {
+            if self
+                .screens
+                .get(&display.id)
+                .is_some_and(|wallpaper| wallpaper.is_empty() || available(&wallpaper.media.path))
+            {
+                continue;
+            }
+            if self.wallpaper.is_empty() {
+                self.screens.remove(&display.id);
+            } else {
+                let mut wallpaper = Wallpaper::new(self.wallpaper.media.clone());
+                wallpaper.cover(pitch, *panel);
+                self.screens.insert(display.id.clone(), wallpaper);
+            }
+        }
+    }
+    pub fn clear_wallpapers(&mut self, matches: &impl Fn(&Path) -> bool) {
+        self.wallpaper.clear_if(matches);
+        forget_screen_wallpapers(&mut self.screens, self.multi, matches);
+    }
+}
+
+fn forget_screen_wallpapers(
+    screens: &mut BTreeMap<String, Wallpaper>,
+    multi: bool,
+    matches: &impl Fn(&Path) -> bool,
+) -> bool {
+    if multi {
+        let mut changed = false;
+        for wallpaper in screens.values_mut() {
+            changed |= wallpaper.clear_if(matches);
+        }
+        changed
+    } else {
+        let before = screens.len();
+        screens.retain(|_, wallpaper| wallpaper.is_empty() || !matches(&wallpaper.media.path));
+        screens.len() != before
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -214,6 +284,15 @@ pub struct Profile {
 impl Profile {
     pub fn is_empty(&self) -> bool {
         self.media.path.as_os_str().is_empty() && self.screens.values().all(Wallpaper::is_empty)
+    }
+    pub fn clear_wallpapers(&mut self, matches: &impl Fn(&Path) -> bool) -> bool {
+        let mut changed = !self.media.path.as_os_str().is_empty() && matches(&self.media.path);
+        if changed {
+            self.media = Media::default();
+            self.framings.clear();
+        }
+        changed |= forget_screen_wallpapers(&mut self.screens, self.multi, matches);
+        changed
     }
     pub fn new(name: &str, s: &Settings, set: &str) -> Self {
         let mut profile = Self {

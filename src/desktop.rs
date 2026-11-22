@@ -3,6 +3,7 @@ use anyhow::{Context, Result, ensure};
 use std::ptr::{null, null_mut};
 use windows_sys::Win32::{
     Foundation::*,
+    Graphics::Gdi::{BLACK_BRUSH, GetStockObject},
     System::{LibraryLoader::GetModuleHandleW, StationsAndDesktops::*},
     UI::WindowsAndMessaging::*,
 };
@@ -41,15 +42,39 @@ pub struct Surface {
     pub hwnd: HWND,
     parent: HWND,
 }
+
+const BLACK_SURFACE_CLASS: &str = "Multipapr Black Wallpaper";
+
+fn register_black_surface(instance: HINSTANCE, class: &[u16]) -> Result<()> {
+    unsafe {
+        let window = WNDCLASSW {
+            lpfnWndProc: Some(DefWindowProcW),
+            hInstance: instance,
+            hbrBackground: GetStockObject(BLACK_BRUSH),
+            lpszClassName: class.as_ptr(),
+            ..std::mem::zeroed()
+        };
+        ensure!(
+            RegisterClassW(&window) != 0 || GetLastError() == ERROR_CLASS_ALREADY_EXISTS,
+            "Cannot register black wallpaper surface: {}",
+            std::io::Error::last_os_error()
+        );
+    }
+    Ok(())
+}
+
 impl Surface {
-    pub fn create(r: Rect) -> Result<Self> {
+    pub fn create(r: Rect, black: bool) -> Result<Self> {
         unsafe {
             let prog = find(null_mut(), null_mut(), "Progman");
             ensure!(!prog.is_null(), "Waiting for Windows Explorer");
             let mut layer = wallpaper_layer(prog);
             let title = wide("Multipapr Wallpaper");
             if layer.is_none_or(|(parent, _)| {
-                FindWindowExW(parent, null_mut(), wide("STATIC").as_ptr(), title.as_ptr()).is_null()
+                ["STATIC", BLACK_SURFACE_CLASS].into_iter().all(|class| {
+                    FindWindowExW(parent, null_mut(), wide(class).as_ptr(), title.as_ptr())
+                        .is_null()
+                })
             }) {
                 let mut reply = 0;
                 SendMessageTimeoutW(prog, 0x052c, 0xd, 0, SMTO_ABORTIFHUNG, 1000, &mut reply);
@@ -59,9 +84,14 @@ impl Surface {
             let (parent, insert_after) =
                 layer.context("Waiting for Explorer’s wallpaper surface")?;
             let ex = WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_LAYERED;
+            let instance = GetModuleHandleW(null());
+            let class = wide(if black { BLACK_SURFACE_CLASS } else { "STATIC" });
+            if black {
+                register_black_surface(instance, &class)?;
+            }
             let hwnd = CreateWindowExW(
                 ex,
-                wide("STATIC").as_ptr(),
+                class.as_ptr(),
                 title.as_ptr(),
                 WS_CHILD | WS_CLIPCHILDREN | WS_CLIPSIBLINGS,
                 0,
@@ -70,7 +100,7 @@ impl Surface {
                 r.h as i32,
                 parent,
                 null_mut(),
-                GetModuleHandleW(null()),
+                instance,
                 null(),
             );
             ensure!(

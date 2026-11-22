@@ -2,6 +2,21 @@
 
 All notable changes to this project are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## v0.3.0
+
+- Added **Gallery** beside Profiles, with live picks from MotionBGs and DesktopHut plus Wikimedia Commons and NASA wallpapers. Click a card to apply it with **Fit**, pause over one for a larger preview, or right-click to choose a display or delete a saved copy.
+- The **Downloaded** filter shows saved wallpapers offline, including files imported from your computer. Settings shows the space used and lets you clear saved copies.
+- Manually selected wallpapers use **Fit** by default. The Gallery cleanup in Settings uses a red **Delete** button with a separate confirmation.
+- Gallery resizes with the editor and blurs the editor behind it. The Multipapr title bar is slightly thinner.
+- Gallery and Settings fade in and out along with their blurred backdrop.
+- Gallery has a larger hover preview, compact right-click menus, and a checkmark on downloaded cards. **Load more** appends results below the current cards.
+- Gallery opens on animated wallpapers. The filter popup offers Still, Animated, Downloaded, and resolution options.
+- Browsing Gallery displays previews in memory. Gallery searches run while the popup is open, and wallpapers are saved when applied.
+- Gallery checks for an original DesktopHut MP4 before showing a card and searches Wikimedia Commons for still images.
+- In Span mode, Gallery closes one second after the selected wallpaper is downloaded. The loading circle beside Multi-mode shows when a new wallpaper is loading in either mode.
+- **Clear** beside Fill and Fit fades the selected display or spanning wallpaper to black. Deleting a saved wallpaper or clearing the Gallery also clears its assignments.
+- Multi-mode fits the current Span wallpaper to new displays and displays whose saved wallpaper was deleted. Cleared displays show **No wallpaper**.
+
 ## v0.2.0
 
 - Multi-mode switches preload the replacement wallpapers and fade them in together after their first rendered frames. A loading circle beside the switch shows when the transition is in progress.

@@ -77,6 +77,12 @@ pub struct Part {
     pub displays: Vec<usize>,
 }
 impl Part {
+    pub fn missing_wallpaper(&self, multi: bool) -> String {
+        missing_wallpaper(
+            self.displays.first().copied().filter(|_| multi),
+            self.media.file_name(),
+        )
+    }
     pub fn desktop(&self, displays: &[Display]) -> Rect {
         self.displays
             .iter()
@@ -84,6 +90,12 @@ impl Part {
             .reduce(Rect::union)
             .unwrap()
     }
+}
+
+pub fn missing_wallpaper(display: Option<usize>, name: Option<&std::ffi::OsStr>) -> String {
+    let target = display.map_or_else(|| "span".into(), |index| format!("Display {}", index + 1));
+    let name = name.map_or_else(String::new, |name| format!(" ({})", name.to_string_lossy()));
+    format!("Missing {target} wallpaper{name}. Please reselect one or choose from the Gallery.")
 }
 pub fn plan(settings: &Settings, displays: &[Display]) -> Vec<Part> {
     let parts = if settings.multi {

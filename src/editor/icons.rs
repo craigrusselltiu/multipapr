@@ -9,8 +9,12 @@ pub(super) enum Icon {
     Close,
     Undo,
     Redo,
+    Gallery,
     Profiles,
     Folder,
+    Picture,
+    Search,
+    Filter,
 }
 
 impl Icon {
@@ -28,6 +32,49 @@ impl Icon {
             Self::Close => {
                 line(point(-4.5, -4.5), point(4.5, 4.5));
                 line(point(-4.5, 4.5), point(4.5, -4.5));
+            }
+            Self::Search => {
+                draw.circle_stroke(point(-1.5, -1.5), 4.5, pen);
+                line(point(1.8, 1.8), point(6.5, 6.5));
+            }
+            Self::Filter => {
+                draw.add(Shape::closed_line(
+                    vec![
+                        point(-7., -5.),
+                        point(7., -5.),
+                        point(2., 0.),
+                        point(2., 6.),
+                        point(-2., 4.),
+                        point(-2., 0.),
+                    ],
+                    pen,
+                ));
+            }
+            Self::Gallery => {
+                draw.add(Shape::line(
+                    vec![point(-6., -9.), point(10., -9.), point(10., 5.)],
+                    pen,
+                ));
+                Self::Picture.paint(draw, point(-1.5, 1.5), tint);
+            }
+            Self::Picture => {
+                draw.rect_stroke(
+                    Rect::from_center_size(center, vec2(18., 14.)),
+                    2,
+                    pen,
+                    StrokeKind::Inside,
+                );
+                draw.circle_filled(point(4., -3.), 1.2, tint);
+                draw.add(Shape::line(
+                    vec![
+                        point(-8., 5.),
+                        point(-2.5, -0.5),
+                        point(3., 5.),
+                        point(6., 2.),
+                        point(8., 4.),
+                    ],
+                    pen,
+                ));
             }
             Self::Undo | Self::Redo => {
                 let flip = if matches!(self, Self::Redo) { -1. } else { 1. };

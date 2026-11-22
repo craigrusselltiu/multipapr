@@ -401,8 +401,13 @@ impl Editor {
             .map(|r| screen_rect(origin, scale, *r))
             .collect();
         for &i in &order {
-            draw.rect_filled(rects[i], 0, PANEL);
             let shown = self.settings.shown(&self.displays[i].id);
+            let background = if shown.is_empty() {
+                Color32::BLACK
+            } else {
+                PANEL
+            };
+            draw.rect_filled(rects[i], 0, background);
             if let Some(tex) = self.textures.get(&shown.media.path) {
                 let r = screen_rect(origin, scale, layout.media(&self.settings, shown));
                 draw.with_clip_rect(rects[i].intersect(area)).image(
@@ -658,12 +663,23 @@ mod tests {
     }
 
     #[test]
-    fn mode_switch_shows_a_spinner_to_the_left_without_moving_the_switch() {
+    fn playback_transition_shows_a_spinner_without_moving_the_switch() {
         let ctx = Context::default();
         let mut editor = covered(&ctx);
         let mut previous = None;
-        for pending in [false, true, false] {
-            editor.mode_switch = pending.then(std::time::SystemTime::now);
+        for (multi, mode_switch) in [
+            (false, None),
+            (false, Some(false)),
+            (true, Some(true)),
+            (true, Some(false)),
+            (true, None),
+        ] {
+            editor.set_multi(multi, |_| true);
+            editor.playback_transition =
+                mode_switch.map(|mode_switch| super::super::PlaybackTransition {
+                    requested: std::time::SystemTime::now(),
+                    mode_switch,
+                });
             let output = ctx.run(
                 RawInput {
                     screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(760., 450.))),
@@ -692,7 +708,7 @@ mod tests {
                 }
                 _ => None,
             });
-            assert_eq!(spinner.is_some(), pending);
+            assert_eq!(spinner.is_some(), mode_switch.is_some());
             if let Some(rect) = previous {
                 assert_eq!(switch, rect);
             }
@@ -709,7 +725,7 @@ mod tests {
         ] {
             let ctx = Context::default();
             let mut editor = covered(&ctx);
-            editor.set_multi(multi);
+            editor.set_multi(multi, |_| true);
             ctx.style_mut(|style| style.animation_time = 0.);
             let mut frame = || {
                 ctx.run(
@@ -722,6 +738,7 @@ mod tests {
                             ctx,
                             editor.brand.id(),
                             true,
+                            false,
                             false,
                             false,
                             false,
@@ -800,7 +817,11 @@ mod tests {
         for multi in [false, true] {
             let ctx = Context::default();
             let mut editor = covered(&ctx);
-            editor.set_multi(multi);
+            editor.set_multi(multi, |_| true);
+            if multi {
+                editor.wallpaper_mut().scale *= 2.;
+                editor.reframe();
+            }
             let layout = editor.layout();
             let panels: Vec<_> = layout.panels.iter().map(|p| screen(&editor, *p)).collect();
             let media = screen(&editor, layout.media(&editor.settings, editor.wallpaper()));
@@ -913,16 +934,26 @@ mod tests {
     fn imports_for_different_displays_can_finish_together() {
         let ctx = Context::default();
         let mut editor = covered(&ctx);
-        editor.set_multi(true);
+        editor.set_multi(true, |_| true);
         for (i, id) in ["a", "b"].into_iter().enumerate() {
             let (tx, rx) = std::sync::mpsc::channel();
             let frame = editor.layout().panels[i];
-            editor.pending.insert(Some(id.into()), (frame, rx));
-            tx.send(Ok(super::super::Imported {
-                media: Media {
-                    path: id.into(),
-                    width: 25,
-                    height: 50,
+            editor.pending.push(super::super::PendingImport {
+                key: None,
+                targets: vec![(Some(id.into()), frame)],
+                result: rx,
+            });
+            tx.send(Ok(crate::gallery::PreparedWallpaper {
+                saved: crate::gallery::SavedWallpaper {
+                    media: Media {
+                        path: id.into(),
+                        width: 25,
+                        height: 50,
+                    },
+                    title: id.into(),
+                    origin: None,
+                    animated: false,
+                    bytes: 0,
                 },
                 image: image::RgbaImage::new(1, 1),
             }))
@@ -934,8 +965,119 @@ mod tests {
             let w = editor.settings.shown(id);
             assert_eq!(w.media.path.to_str(), Some(id));
             assert_eq!(w.center, editor.layout().panels[i].center());
+            assert!(w.scale > 1.);
         }
         assert!(editor.pending.is_empty());
+    }
+
+    #[test]
+    fn applying_an_animated_wallpaper_uses_fit_from_gallery_or_file_in_both_modes() {
+        let ctx = Context::default();
+        for (multi, from_gallery) in [(false, false), (false, true), (true, false), (true, true)] {
+            let mut editor = covered(&ctx);
+            editor.set_multi(multi, |_| true);
+            editor.selected = 1;
+            let frame = editor.target(&editor.layout());
+            let pitch = editor.layout().pitch(&editor.settings);
+            let first_display = editor.settings.shown("a").clone();
+            let media = Media {
+                path: "animated.mp4".into(),
+                width: 3840,
+                height: 2160,
+            };
+            let mut expected = crate::layout::Wallpaper::new(media.clone());
+            expected.cover(pitch, frame);
+            assert_ne!(expected.scale, 1.);
+
+            let (tx, result) = std::sync::mpsc::channel();
+            editor.pending.push(super::super::PendingImport {
+                key: from_gallery
+                    .then(|| super::super::gallery::CardKey::Saved(media.path.clone())),
+                targets: vec![(editor.import_target(), frame)],
+                result,
+            });
+            tx.send(Ok(crate::gallery::PreparedWallpaper {
+                saved: crate::gallery::SavedWallpaper {
+                    media,
+                    title: "Animated wallpaper".into(),
+                    origin: None,
+                    animated: true,
+                    bytes: 0,
+                },
+                image: image::RgbaImage::new(1, 1),
+            }))
+            .ok()
+            .unwrap();
+            editor.collect(&ctx);
+
+            assert!(
+                editor.wallpaper() == &expected,
+                "Wallpaper did not Fit in multi={multi}, from_gallery={from_gallery}"
+            );
+            if multi {
+                assert!(editor.settings.shown("a") == &first_display);
+            }
+        }
+    }
+
+    #[test]
+    fn clearing_targets_only_the_selected_wallpaper_and_cancels_its_pending_apply() {
+        let ctx = Context::default();
+        let mut editor = covered(&ctx);
+        editor.set_multi(true, |_| true);
+        editor.selected = 1;
+        let span = editor.settings.wallpaper.clone();
+        let other = editor.settings.shown("a").clone();
+        let layout = editor.layout();
+        let (_tx, result) = std::sync::mpsc::channel();
+        editor.pending.push(super::super::PendingImport {
+            key: None,
+            targets: vec![
+                (Some("a".into()), layout.panels[0]),
+                (Some("b".into()), layout.panels[1]),
+            ],
+            result,
+        });
+        editor.clear_wallpaper();
+        assert!(editor.settings.shown("b").is_empty());
+        assert!(editor.settings.shown("a") == &other);
+        assert!(editor.settings.wallpaper == span);
+        assert_eq!(
+            editor.pending[0].targets,
+            vec![(Some("a".into()), layout.panels[0])]
+        );
+
+        editor.set_multi(false, |_| true);
+        editor.clear_wallpaper();
+        assert!(editor.settings.wallpaper.is_empty());
+        assert!(editor.settings.screens["a"] == other);
+        assert!(editor.settings.screens["b"].is_empty());
+    }
+
+    #[test]
+    fn removing_a_gallery_file_clears_its_assignments_in_profiles_and_undo() {
+        let ctx = Context::default();
+        let mut editor = covered(&ctx);
+        editor.set_multi(true, |_| true);
+        let deleted = editor.settings.wallpaper.media.path.clone();
+        editor.selected = 1;
+        editor.wallpaper_mut().media.path = "kept.jpg".into();
+        let kept = editor.wallpaper().clone();
+        editor.remember_current();
+        editor.undo.push(super::super::HistoryStep::new(
+            &editor.settings,
+            &editor.profiles,
+        ));
+        editor.forget_gallery_wallpapers(|path| path == deleted);
+        assert!(editor.settings.wallpaper.is_empty());
+        assert!(editor.settings.shown("a").is_empty());
+        assert!(editor.settings.shown("b") == &kept);
+        assert!(editor.profiles[0].media.path.as_os_str().is_empty());
+        assert!(editor.profiles[0].screens["a"].is_empty());
+        assert!(editor.profiles[0].screens["b"] == kept);
+        editor.step(true);
+        assert!(editor.settings.wallpaper.is_empty());
+        assert!(editor.settings.shown("a").is_empty());
     }
 
     #[test]
@@ -994,18 +1136,46 @@ mod tests {
     }
 
     #[test]
-    fn multi_mode_starts_each_display_on_the_span_and_edits_only_the_selected_one() {
+    fn multi_mode_fits_span_to_each_display_and_edits_only_the_selected_one() {
         let ctx = Context::default();
         let mut editor = covered(&ctx);
-        editor.set_multi(true);
+        editor.set_multi(true, |_| true);
         assert!(editor.settings.screens.len() == 2);
-        for id in ["a", "b"] {
-            assert!(editor.settings.shown(id) == &editor.settings.wallpaper);
+        let layout = editor.layout();
+        let pitch = layout.pitch(&editor.settings);
+        for (id, panel) in ["a", "b"].into_iter().zip(layout.panels) {
+            let mut fitted = crate::layout::Wallpaper::new(editor.settings.wallpaper.media.clone());
+            fitted.cover(pitch, panel);
+            assert!(editor.settings.shown(id) == &fitted);
         }
+        let other = editor.settings.shown("a").clone();
+        let selected = editor.settings.shown("b").clone();
         editor.selected = 1;
         editor.wallpaper_mut().scale *= 2.;
-        assert!(editor.settings.shown("a") == &editor.settings.wallpaper);
-        assert!(editor.settings.shown("b") != &editor.settings.wallpaper);
+        assert!(editor.settings.shown("a") == &other);
+        assert!(editor.settings.shown("b") != &selected);
+    }
+
+    #[test]
+    fn multi_mode_fits_span_for_a_deleted_file_and_keeps_a_cleared_display_empty() {
+        let ctx = Context::default();
+        let mut editor = covered(&ctx);
+        let span = editor.settings.wallpaper.clone();
+        let mut deleted = span.clone();
+        deleted.media.path = "deleted.mp4".into();
+        editor.settings.screens.insert("a".into(), deleted);
+        let empty = crate::layout::Wallpaper::new(Media::default());
+        editor.settings.screens.insert("b".into(), empty.clone());
+        editor.message = "Missing Display 1 wallpaper".into();
+
+        editor.set_multi(true, |path| path == span.media.path);
+        let layout = editor.layout();
+        let mut fitted = crate::layout::Wallpaper::new(span.media.clone());
+        fitted.cover(layout.pitch(&editor.settings), layout.panels[0]);
+        assert!(editor.settings.shown("a") == &fitted);
+        assert!(editor.settings.shown("b") == &empty);
+        assert!(editor.settings.wallpaper == span);
+        assert!(editor.message.is_empty());
     }
 
     #[test]

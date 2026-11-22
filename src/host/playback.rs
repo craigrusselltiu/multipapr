@@ -7,6 +7,17 @@ fn covers(window: Rect, area: Rect) -> bool {
         && window.bottom() >= area.bottom()
 }
 
+fn covered_by(player: &Player, replacements: &[Player]) -> bool {
+    replacements
+        .iter()
+        .any(|new| covers(new.desktop, player.desktop))
+        || player
+            .part
+            .displays
+            .iter()
+            .all(|i| replacements.iter().any(|new| new.part.displays.contains(i)))
+}
+
 pub(super) struct PlaybackPolicy {
     locked: bool,
     foreground: Option<Rect>,
@@ -60,7 +71,7 @@ pub(super) struct Players {
     loading: Vec<Player>,
     desired: Vec<PathBuf>,
     failures: BTreeMap<PathBuf, (Instant, String)>,
-    fade: Option<Instant>,
+    fade: Option<(Instant, bool)>,
 }
 
 impl Players {
@@ -93,11 +104,7 @@ impl Players {
             loading: false,
             displays: BTreeMap::new(),
         };
-        let plan = shader::plan(settings, displays);
-        let desired: Vec<_> = plan
-            .iter()
-            .map(|part| player_pipe(report.host, settings.multi, part, displays))
-            .collect();
+        let mut plan = shader::plan(settings, displays);
         if let Some(reason) = policy.stopped() {
             *self = Self::default();
             for part in plan {
@@ -105,6 +112,20 @@ impl Players {
             }
             return Ok(report);
         }
+        plan.extend(
+            displays
+                .iter()
+                .enumerate()
+                .filter(|(_, display)| settings.shown(&display.id).is_empty())
+                .map(|(index, _)| Part {
+                    media: PathBuf::new(),
+                    displays: vec![index],
+                }),
+        );
+        let desired: Vec<_> = plan
+            .iter()
+            .map(|part| player_pipe(report.host, settings.multi, part, displays))
+            .collect();
         if desired != self.desired {
             self.cancel_fade();
             self.loading.retain(|p| desired.contains(&p.pipe));
@@ -121,7 +142,7 @@ impl Players {
                 .find(|p| &p.pipe == pipe);
             if let Some(p) = player {
                 p.part.clone_from(part);
-                if mapping_changed {
+                if mapping_changed && p.playback.is_some() {
                     p.pending_mapping = Some(shader::parameters(&layout, settings, displays, part));
                 }
             } else if self
@@ -162,6 +183,9 @@ impl Players {
             });
         }
         for (part, pipe) in plan.iter().zip(&self.desired) {
+            if part.media.as_os_str().is_empty() {
+                continue;
+            }
             let status = if let Some((_, msg)) = self.failures.get(pipe) {
                 msg.as_str()
             } else if let Some(p) = self.visible.iter().find(|p| &p.pipe == pipe) {
@@ -209,45 +233,57 @@ impl Players {
                     .chain(&self.loading)
                     .any(|p| &p.pipe == pipe)
             });
-        if missing_replacement || self.loading.iter().any(|p| p.still.is_none()) {
+        let waiting = missing_replacement || self.loading.iter().any(|p| p.still.is_none());
+        // A failed decode on another display must not keep a cleared wallpaper visible.
+        let only_black = self
+            .fade
+            .map_or(waiting && !self.failures.is_empty(), |(_, black)| black);
+        let transitioning = |player: &Player| !only_black || player.playback.is_none();
+        if (waiting && !only_black) || (only_black && !self.loading.iter().any(transitioning)) {
             self.cancel_fade();
             return Ok(());
         }
         if self.fade.is_none() {
-            for p in &self.loading {
+            for p in self.loading.iter().filter(|p| transitioning(p)) {
                 p.surface.raise(p.desktop)?;
             }
         }
-        let start = self.fade.get_or_insert_with(Instant::now);
+        let (start, _) = self
+            .fade
+            .get_or_insert_with(|| (Instant::now(), only_black));
         let t = (start.elapsed().as_secs_f32() / 0.32).min(1.);
         let alpha = (255. * t * t * (3. - 2. * t)).round() as u8;
-        for p in &self.loading {
+        for p in self.loading.iter().filter(|p| transitioning(p)) {
             p.surface.opacity(alpha)?;
         }
-        for p in &self.visible {
-            let covered_by_new = self
-                .loading
-                .iter()
-                .any(|new| covers(new.desktop, p.desktop))
-                || p.part
-                    .displays
-                    .iter()
-                    .all(|i| self.loading.iter().any(|new| new.part.displays.contains(i)));
-            if !self.desired.contains(&p.pipe) && !covered_by_new {
-                p.surface.opacity(255 - alpha)?;
+        if !only_black {
+            for p in &self.visible {
+                if !self.desired.contains(&p.pipe) && !covered_by(p, &self.loading) {
+                    p.surface.opacity(255 - alpha)?;
+                }
             }
         }
         if t >= 1. {
-            self.visible.retain(|p| self.desired.contains(&p.pipe));
-            self.visible.append(&mut self.loading);
+            if only_black {
+                let (black, remaining): (Vec<_>, Vec<_>) =
+                    self.loading.drain(..).partition(transitioning);
+                self.visible
+                    .retain(|p| self.desired.contains(&p.pipe) || !covered_by(p, &black));
+                self.visible.extend(black);
+                self.loading = remaining;
+            } else {
+                self.visible.retain(|p| self.desired.contains(&p.pipe));
+                self.visible.append(&mut self.loading);
+            }
             self.fade = None;
         }
         Ok(())
     }
     pub(super) fn is_loading(&self) -> bool {
-        self.failures.is_empty()
-            && (!self.loading.is_empty()
-                || self.visible.iter().any(|p| !self.desired.contains(&p.pipe)))
+        self.loading.iter().any(|p| p.playback.is_none())
+            || self.failures.is_empty()
+                && (!self.loading.is_empty()
+                    || self.visible.iter().any(|p| !self.desired.contains(&p.pipe)))
     }
 
     pub(super) fn interval(&self) -> u128 {
@@ -266,20 +302,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn mode_switch_waits_for_the_requested_layout_and_its_fade() {
+    fn playback_waits_for_the_requested_layout_and_its_fade() {
         let requested = SystemTime::now();
         let mut report = PlaybackReport {
             host: 1,
-            layout_modified: Some(requested - Duration::from_secs(1)),
+            layout_modified: None,
             loading: false,
             displays: BTreeMap::new(),
         };
-        assert!(!report.switch_finished(requested));
+        assert!(!report.layout_finished(requested));
+        report.layout_modified = Some(requested - Duration::from_secs(1));
+        assert!(!report.layout_finished(requested));
         report.layout_modified = Some(requested);
         report.loading = true;
-        assert!(!report.switch_finished(requested));
+        assert!(!report.layout_finished(requested));
         report.loading = false;
-        assert!(report.switch_finished(requested));
+        assert!(report.layout_finished(requested));
     }
 
     #[test]
