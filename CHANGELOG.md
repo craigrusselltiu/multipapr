@@ -2,6 +2,10 @@
 
 All notable changes to this project are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## v0.3.6
+
+- Gallery hover previews fit the wallpaper's aspect ratio within the editor. Wallpapers with the same aspect ratio share the same preview size.
+
 ## v0.3.5
 
 - Replaced the animated wallpaper playback control with a play/pause icon button beside **Fill** and **Fit**.

@@ -1471,18 +1471,17 @@ fn show_preview_tooltip(
         return;
     };
     let (_, width, height) = item.label();
-    let texture_size = image.size_vec2();
-    let resolution = if width > 0 && height > 0 {
-        vec2(width as f32, height as f32)
+    let image_aspect = image.aspect_ratio();
+    let aspect = if width > 0 && height > 0 {
+        width as f32 / height as f32
     } else {
-        texture_size
+        image_aspect
     };
     let bounds = ctx.screen_rect();
     let limit = (bounds.size() * vec2(0.60, 0.62)).min(vec2(540., 380.));
-    let scale = lerp(0.65..=1., (resolution.max_elem() / 3840.).min(1.));
-    let size = fit_size(resolution, limit) * scale;
+    let size = fit_aspect(aspect, limit);
     let rect = Rect::from_center_size(bounds.center(), size);
-    let image_rect = Rect::from_center_size(rect.center(), fit_size(texture_size, size));
+    let image_rect = Rect::from_center_size(rect.center(), fit_aspect(image_aspect, size));
     let draw = ctx.layer_painter(LayerId::new(
         Order::Tooltip,
         response.id.with("gallery preview"),
@@ -1492,8 +1491,9 @@ fn show_preview_tooltip(
     paint_preview(&draw, image_rect, Some(&image), false);
 }
 
-fn fit_size(size: Vec2, limit: Vec2) -> Vec2 {
-    size * (limit.x / size.x).min(limit.y / size.y)
+fn fit_aspect(aspect: f32, limit: Vec2) -> Vec2 {
+    let width = limit.x.min(limit.y * aspect);
+    vec2(width, width / aspect)
 }
 
 #[cfg(test)]
@@ -1967,7 +1967,7 @@ mod tests {
     }
 
     #[test]
-    fn hover_preview_uses_the_wallpaper_resolution_instead_of_its_poster_size() {
+    fn hover_preview_uses_the_wallpaper_aspect_ratio() {
         let ctx = Context::default();
         let screen = Rect::from_min_size(Pos2::ZERO, vec2(760., 450.));
         let image = ctx.load_texture(
@@ -2016,16 +2016,13 @@ mod tests {
             .unwrap()
         };
 
-        let full_hd = preview(1920, 1080);
-        let uhd = preview(3840, 2160);
-        let portrait = preview(1080, 1920);
-        let ultrawide = preview(3440, 1440);
-        assert!(uhd.width() > full_hd.width() && uhd.height() > full_hd.height());
+        let landscape = preview(1920, 1080);
+        assert_eq!(preview(1280, 720), landscape);
+        assert_eq!(preview(3840, 2160), landscape);
         for (rect, aspect) in [
-            (full_hd, 16. / 9.),
-            (uhd, 16. / 9.),
-            (portrait, 9. / 16.),
-            (ultrawide, 3440. / 1440.),
+            (landscape, 16. / 9.),
+            (preview(1080, 1920), 9. / 16.),
+            (preview(3440, 1440), 3440. / 1440.),
         ] {
             assert!((rect.aspect_ratio() - aspect).abs() < 0.001);
             assert!((rect.center() - screen.center()).length() < 0.001);
