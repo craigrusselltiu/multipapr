@@ -1489,31 +1489,59 @@ mod tests {
                 .collect()
         };
 
-        // Still wallpaper: Fill & Fit only, no Clear button, no Pause/Play button.
+        let pause_bars = |out: &FullOutput, fill: Rect| -> Vec<Rect> {
+            out.shapes
+                .iter()
+                .filter_map(|shape| match &shape.shape {
+                    Shape::Rect(bar)
+                        if bar.rect.size() == vec2(2.5, 12.)
+                            && bar.rect.right() < fill.left()
+                            && (bar.rect.center().y - fill.center().y).abs() < 3. =>
+                    {
+                        Some(bar.rect)
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+
         let out = run_workspace(&mut editor, vec![]);
         let items = texts(&out);
-        assert!(items.iter().any(|(t, _)| t == "Fill"));
+        let fill = items.iter().find(|(t, _)| t == "Fill").unwrap().1;
+        assert!(pause_bars(&out, fill).is_empty());
         assert!(items.iter().any(|(t, _)| t == "Fit"));
         assert!(!items.iter().any(|(t, _)| t == "Clear"));
-        assert!(!items.iter().any(|(t, _)| t == "Pause" || t == "Play"));
 
-        // Switch to MP4: [Pause] [Fill] [Fit] in order.
         editor.settings.wallpaper.media.path = "chainsawman.mp4".into();
         let out = run_workspace(&mut editor, vec![]);
         let items = texts(&out);
-        let pause_rect = items.iter().find(|(t, _)| t == "Pause").unwrap().1;
+        assert!(!items.iter().any(|(t, _)| t == "Pause" || t == "Play"));
         let fill_rect = items.iter().find(|(t, _)| t == "Fill").unwrap().1;
         let fit_rect = items.iter().find(|(t, _)| t == "Fit").unwrap().1;
-        assert!(pause_rect.right() < fill_rect.left());
+        let bars = pause_bars(&out, fill_rect);
+        assert_eq!(bars.len(), 2);
         assert!(fill_rect.right() < fit_rect.left());
 
-        // Click Pause -> toggles paused state and changes label to Play.
-        let p = pause_rect.center();
+        let p = bars[0].union(bars[1]).center();
         run_workspace(&mut editor, vec![Event::PointerMoved(p), button(p, true)]);
-        run_workspace(&mut editor, vec![button(p, false)]);
+        let released = run_workspace(&mut editor, vec![button(p, false)]);
+        let clicked = |out: &FullOutput, label: &str| {
+            out.platform_output.events.iter().any(|event| {
+                matches!(event, output::OutputEvent::Clicked(info) if info.label.as_deref() == Some(label))
+            })
+        };
+        assert!(clicked(&released, "Pause"));
         assert!(editor.settings.wallpaper.paused);
         let out = run_workspace(&mut editor, vec![]);
-        assert!(texts(&out).iter().any(|(t, _)| t == "Play"));
+        assert!(!texts(&out).iter().any(|(t, _)| t == "Pause" || t == "Play"));
+        assert!(out.shapes.iter().any(|shape| {
+            matches!(&shape.shape, Shape::Path(path)
+                if path.closed && path.points.len() == 3 && path.visual_bounding_rect().contains(p))
+        }));
+        run_workspace(&mut editor, vec![button(p, true)]);
+        let released = run_workspace(&mut editor, vec![button(p, false)]);
+        assert!(clicked(&released, "Play"));
+        assert!(!editor.settings.wallpaper.paused);
 
         // Expand Advanced and confirm Playback status & path are removed.
         let adv = texts(&out)
@@ -1522,7 +1550,10 @@ mod tests {
             .unwrap()
             .1
             .center();
-        run_workspace(&mut editor, vec![Event::PointerMoved(adv), button(adv, true)]);
+        run_workspace(
+            &mut editor,
+            vec![Event::PointerMoved(adv), button(adv, true)],
+        );
         run_workspace(&mut editor, vec![button(adv, false)]);
         let out = run_workspace(&mut editor, vec![]);
         let adv_texts = texts(&out);

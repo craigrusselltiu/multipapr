@@ -78,7 +78,7 @@ impl AnimatedPreview {
     fn new(ctx: &Context, name: &str, frames: PreviewFrames) -> Self {
         let texture = ctx.load_texture(
             name,
-            ColorImage::from_rgb(PreviewFrames::SIZE, frames.frame(0).1),
+            ColorImage::from_rgb(frames.size(), frames.frame(0).1),
             TextureOptions::LINEAR,
         );
         Self {
@@ -93,7 +93,7 @@ impl AnimatedPreview {
         let (index, frame) = self.frames.frame(elapsed_frames as usize);
         if index != self.current_frame {
             self.texture.set(
-                ColorImage::from_rgb(PreviewFrames::SIZE, frame),
+                ColorImage::from_rgb(self.frames.size(), frame),
                 TextureOptions::LINEAR,
             );
             self.current_frame = index;
@@ -1470,19 +1470,30 @@ fn show_preview_tooltip(
     else {
         return;
     };
+    let (_, width, height) = item.label();
+    let texture_size = image.size_vec2();
+    let resolution = if width > 0 && height > 0 {
+        vec2(width as f32, height as f32)
+    } else {
+        texture_size
+    };
     let bounds = ctx.screen_rect();
     let limit = (bounds.size() * vec2(0.60, 0.62)).min(vec2(540., 380.));
-    let aspect = image.aspect_ratio();
-    let width = limit.x.min(limit.y * aspect);
-    let size = vec2(width, width / aspect);
+    let scale = lerp(0.65..=1., (resolution.max_elem() / 3840.).min(1.));
+    let size = fit_size(resolution, limit) * scale;
     let rect = Rect::from_center_size(bounds.center(), size);
+    let image_rect = Rect::from_center_size(rect.center(), fit_size(texture_size, size));
     let draw = ctx.layer_painter(LayerId::new(
         Order::Tooltip,
         response.id.with("gallery preview"),
     ));
     draw.rect_filled(rect.expand(1.), 9, LINE);
     draw.rect_filled(rect, 8, INK);
-    paint_preview(&draw, rect, Some(&image), false);
+    paint_preview(&draw, image_rect, Some(&image), false);
+}
+
+fn fit_size(size: Vec2, limit: Vec2) -> Vec2 {
+    size * (limit.x / size.x).min(limit.y / size.y)
 }
 
 #[cfg(test)]
@@ -1953,6 +1964,73 @@ mod tests {
         assert!(apply.x >= pointer.x + 9.);
         assert_eq!(apply.x, delete.x);
         assert!((delete.y - apply.y - 26.).abs() < 1.);
+    }
+
+    #[test]
+    fn hover_preview_uses_the_wallpaper_resolution_instead_of_its_poster_size() {
+        let ctx = Context::default();
+        let screen = Rect::from_min_size(Pos2::ZERO, vec2(760., 450.));
+        let image = ctx.load_texture(
+            "shared poster",
+            ColorImage::new([32, 18], Color32::GRAY),
+            TextureOptions::LINEAR,
+        );
+        let mut thumbnails = Thumbnails::default();
+        thumbnails.loaded.push_back(("poster".into(), Some(image)));
+        let mut preview = |width, height| {
+            let mut listing = Listing::test_wallpaper("Wallpaper", 1);
+            listing.width = width;
+            listing.height = height;
+            listing.thumbnail = Some("poster".into());
+            let item = Card::Online(&listing);
+            let mut hover = Some((item.key(), Some(0.)));
+            ctx.run(
+                RawInput {
+                    screen_rect: Some(screen),
+                    time: Some(1.),
+                    ..Default::default()
+                },
+                |ctx| {
+                    CentralPanel::default().show(ctx, |ui| {
+                        let response = ui.allocate_response(Vec2::ZERO, Sense::hover());
+                        show_preview_tooltip(
+                            ctx,
+                            &mut hover,
+                            &mut thumbnails,
+                            Some((item, response)),
+                            false,
+                        );
+                    });
+                },
+            )
+            .shapes
+            .into_iter()
+            .find_map(|shape| match shape.shape {
+                Shape::Rect(rect)
+                    if rect.fill == INK && rect.corner_radius == CornerRadius::same(8) =>
+                {
+                    Some(rect.rect)
+                }
+                _ => None,
+            })
+            .unwrap()
+        };
+
+        let full_hd = preview(1920, 1080);
+        let uhd = preview(3840, 2160);
+        let portrait = preview(1080, 1920);
+        let ultrawide = preview(3440, 1440);
+        assert!(uhd.width() > full_hd.width() && uhd.height() > full_hd.height());
+        for (rect, aspect) in [
+            (full_hd, 16. / 9.),
+            (uhd, 16. / 9.),
+            (portrait, 9. / 16.),
+            (ultrawide, 3440. / 1440.),
+        ] {
+            assert!((rect.aspect_ratio() - aspect).abs() < 0.001);
+            assert!((rect.center() - screen.center()).length() < 0.001);
+            assert!(screen.contains_rect(rect));
+        }
     }
 
     #[test]

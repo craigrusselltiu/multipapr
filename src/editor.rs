@@ -937,21 +937,24 @@ impl Editor {
         let has = !self.wallpaper().is_empty();
         let animated = has && self.is_animated_wallpaper(&self.wallpaper().media.path);
         ui.horizontal(|ui| {
-            let count = if animated { 3. } else { 2. };
-            let button_size = vec2(
-                (ui.available_width() - (count - 1.) * ui.spacing().item_spacing.x) / count,
-                30.,
-            );
+            let height = ui.spacing().interact_size.y.max(30.);
+            let gap = ui.spacing().item_spacing.x;
+            let playback_width = if animated { height + gap } else { 0. };
+            let button_size = vec2((ui.available_width() - gap - playback_width) / 2., height);
             ui.add_enabled_ui(has, |ui| {
                 if animated {
                     let paused = self.wallpaper().paused;
-                    let (label, hint) = if paused {
-                        ("Play", "Resume animated wallpaper")
+                    let (icon, label, hint) = if paused {
+                        (Icon::Play, "Play", "Resume animated wallpaper")
                     } else {
-                        ("Pause", "Stop animation and display the first frame")
+                        (
+                            Icon::Pause,
+                            "Pause",
+                            "Pause animated wallpaper and display the first frame",
+                        )
                     };
-                    if ui
-                        .add_sized(button_size, Button::new(label))
+                    if icon
+                        .framed_button(ui, Vec2::splat(height), label)
                         .hint(hint)
                         .clicked()
                     {

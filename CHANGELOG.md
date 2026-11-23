@@ -2,6 +2,11 @@
 
 All notable changes to this project are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## v0.3.5
+
+- Replaced the animated wallpaper playback control with a play/pause icon button beside **Fill** and **Fit**.
+- Gallery hover previews now size to the wallpaper’s resolution and aspect ratio, within the editor window. Animated previews preserve portrait and ultrawide framing.
+
 ## v0.3.3
 
 - Added **Pause** / **Play** beside **Fill** and **Fit** for animated wallpapers. Pausing stops the video player and displays the first frame as a static wallpaper with no GPU use.

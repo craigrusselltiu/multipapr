@@ -5,6 +5,8 @@ use eframe::egui::*;
 pub(super) enum Icon {
     Minus,
     Plus,
+    Play,
+    Pause,
     Cog,
     Close,
     Undo,
@@ -27,6 +29,22 @@ impl Icon {
                 line(point(-5., 0.), point(5., 0.));
                 if matches!(self, Self::Plus) {
                     line(point(0., -5.), point(0., 5.));
+                }
+            }
+            Self::Play => {
+                draw.add(Shape::convex_polygon(
+                    vec![point(-4., -6.), point(6., 0.), point(-4., 6.)],
+                    tint,
+                    Stroke::NONE,
+                ));
+            }
+            Self::Pause => {
+                for x in [-3., 3.] {
+                    draw.rect_filled(
+                        Rect::from_center_size(point(x, 0.), vec2(2.5, 12.)),
+                        1,
+                        tint,
+                    );
                 }
             }
             Self::Close => {
@@ -165,6 +183,21 @@ impl Icon {
             rect.center(),
             if selected { ACCENT } else { MUTED },
         );
+        response.on_hover_cursor(CursorIcon::PointingHand)
+    }
+
+    pub(super) fn framed_button(self, ui: &mut Ui, size: Vec2, label: &str) -> Response {
+        let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+        response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, ui.is_enabled(), label));
+        let visuals = ui.style().interact(&response);
+        ui.painter().rect(
+            rect.expand(visuals.expansion),
+            visuals.corner_radius,
+            visuals.weak_bg_fill,
+            visuals.bg_stroke,
+            StrokeKind::Inside,
+        );
+        self.paint(ui.painter(), rect.center(), visuals.text_color());
         response.on_hover_cursor(CursorIcon::PointingHand)
     }
 }
