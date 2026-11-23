@@ -1792,7 +1792,7 @@ mod tests {
         let mut gallery = Gallery::default();
         gallery.generation = 1;
         gallery.batch = Some(Batch::Initial);
-        let thumbnail = "https://th.wallhaven.cc/lg/00/000001.jpg";
+        let thumbnail = "https://th.wallhaven.cc/orig/00/000001.jpg";
         let mut first = Listing::test_wallpaper("First wallpaper", 1);
         first.thumbnail = Some(thumbnail.into());
         gallery.searches[0].results.push(first);
@@ -1970,21 +1970,26 @@ mod tests {
     fn hover_preview_uses_the_wallpaper_aspect_ratio() {
         let ctx = Context::default();
         let screen = Rect::from_min_size(Pos2::ZERO, vec2(760., 450.));
-        let image = ctx.load_texture(
-            "shared poster",
-            ColorImage::new([32, 18], Color32::GRAY),
-            TextureOptions::LINEAR,
-        );
-        let mut thumbnails = Thumbnails::default();
-        thumbnails.loaded.push_back(("poster".into(), Some(image)));
-        let mut preview = |width, height| {
+        let poster = |size| {
+            ctx.load_texture(
+                "poster",
+                ColorImage::new(size, Color32::GRAY),
+                TextureOptions::LINEAR,
+            )
+        };
+        let preview = |[width, height]: [u32; 2], image: TextureHandle| {
+            let mut thumbnails = Thumbnails::default();
+            thumbnails
+                .loaded
+                .push_back(("poster".into(), Some(image.clone())));
+
             let mut listing = Listing::test_wallpaper("Wallpaper", 1);
             listing.width = width;
             listing.height = height;
             listing.thumbnail = Some("poster".into());
             let item = Card::Online(&listing);
             let mut hover = Some((item.key(), Some(0.)));
-            ctx.run(
+            let output = ctx.run(
                 RawInput {
                     screen_rect: Some(screen),
                     time: Some(1.),
@@ -2002,27 +2007,35 @@ mod tests {
                         );
                     });
                 },
-            )
-            .shapes
-            .into_iter()
-            .find_map(|shape| match shape.shape {
-                Shape::Rect(rect)
-                    if rect.fill == INK && rect.corner_radius == CornerRadius::same(8) =>
-                {
-                    Some(rect.rect)
-                }
-                _ => None,
-            })
-            .unwrap()
+            );
+            let rects = || {
+                output.shapes.iter().filter_map(|shape| match &shape.shape {
+                    Shape::Rect(rect) => Some(rect),
+                    _ => None,
+                })
+            };
+            let bounds = rects()
+                .find(|rect| rect.fill == INK && rect.corner_radius == CornerRadius::same(8))
+                .unwrap()
+                .rect;
+            let picture = rects()
+                .find(|rect| rect.fill_texture_id() == image.id())
+                .unwrap();
+            assert!((picture.rect.size() - bounds.size()).abs().max_elem() < 1.);
+            assert_eq!(
+                picture.brush.as_ref().unwrap().uv,
+                Rect::from_min_max(Pos2::ZERO, pos2(1., 1.))
+            );
+            bounds
         };
 
-        let landscape = preview(1920, 1080);
-        assert_eq!(preview(1280, 720), landscape);
-        assert_eq!(preview(3840, 2160), landscape);
+        let landscape = preview([1920, 1080], poster([432, 243]));
+        assert_eq!(preview([1280, 720], poster([432, 243])), landscape);
+        assert_eq!(preview([3840, 2160], poster([432, 243])), landscape);
         for (rect, aspect) in [
             (landscape, 16. / 9.),
-            (preview(1080, 1920), 9. / 16.),
-            (preview(3440, 1440), 3440. / 1440.),
+            (preview([3372, 6139], poster([165, 300])), 3372. / 6139.),
+            (preview([3440, 1440], poster([215, 90])), 3440. / 1440.),
         ] {
             assert!((rect.aspect_ratio() - aspect).abs() < 0.001);
             assert!((rect.center() - screen.center()).length() < 0.001);

@@ -2,6 +2,10 @@
 
 All notable changes to this project are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## v0.3.7
+
+- Gallery uses uncropped Wallhaven thumbnails so portrait and ultrawide hover previews show the full image.
+
 ## v0.3.6
 
 - Gallery hover previews fit the wallpaper's aspect ratio within the editor. Wallpapers with the same aspect ratio share the same preview size.

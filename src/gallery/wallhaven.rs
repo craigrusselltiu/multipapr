@@ -7,7 +7,7 @@ use url::Url;
 const API: &str = "https://wallhaven.cc/api/v1/search";
 const WALLPAPER: &str = "https://wallhaven.cc/w/";
 const ORIGINAL: &str = "https://w.wallhaven.cc/full/";
-const THUMBNAIL: &str = "https://th.wallhaven.cc/lg/";
+const THUMBNAIL: &str = "https://th.wallhaven.cc/orig/";
 
 fn valid_id(id: &str) -> bool {
     id.len() == 6
@@ -30,7 +30,7 @@ pub(super) fn download_url(raw: &str) -> Option<Url> {
 
 pub(super) fn thumbnail_url(raw: &str) -> Option<Url> {
     let url = trusted_url(raw, &[THUMBNAIL])?;
-    let (folder, name) = url.path().strip_prefix("/lg/")?.split_once('/')?;
+    let (folder, name) = url.path().strip_prefix("/orig/")?.split_once('/')?;
     let id = name.strip_suffix(".jpg")?;
     (valid_id(id) && folder == &id[..2]).then_some(url)
 }
@@ -92,7 +92,7 @@ struct Wallpaper {
 
 #[derive(Deserialize)]
 struct Thumbnails {
-    large: String,
+    original: String,
 }
 
 impl Wallpaper {
@@ -104,7 +104,7 @@ impl Wallpaper {
         let id = &self.id;
         let folder = &id[..2];
         if self.path != format!("{ORIGINAL}{folder}/wallhaven-{id}.{}", format.extension())
-            || self.thumbs.large != format!("{THUMBNAIL}{folder}/{id}.jpg")
+            || self.thumbs.original != format!("{THUMBNAIL}{folder}/{id}.jpg")
         {
             return None;
         }
@@ -113,7 +113,7 @@ impl Wallpaper {
             source: Source::Wallhaven,
             width: self.dimension_x,
             height: self.dimension_y,
-            thumbnail: Some(self.thumbs.large),
+            thumbnail: Some(self.thumbs.original),
             preview: None,
             page: format!("{WALLPAPER}{id}"),
             download: self.path,
@@ -184,13 +184,18 @@ mod tests {
                 "id": id, "purity": purity, "file_type": "image/jpeg",
                 "dimension_x": width, "dimension_y": height,
                 "path": format!("{ORIGINAL}{folder}/wallhaven-{id}.jpg"),
-                "thumbs": {"large": format!("{THUMBNAIL}{folder}/{id}.jpg")}
+                "thumbs": {
+                    "large": format!("https://th.wallhaven.cc/lg/{folder}/{id}.jpg"),
+                    "original": format!("{THUMBNAIL}{folder}/{id}.jpg"),
+                }
             })
         };
         let mut external = wallpaper("ab0004", "sfw", 3840, 2160);
         external["path"] = json!("https://example.org/wallpaper.jpg");
         let mut wrong_format = wallpaper("ab0005", "sfw", 3840, 2160);
         wrong_format["file_type"] = json!("image/png");
+        let mut wrong_thumbnail = wallpaper("ab0007", "sfw", 3840, 2160);
+        wrong_thumbnail["thumbs"]["original"] = json!(format!("{THUMBNAIL}ab/ab0001.jpg"));
         let response = json!({
             "meta": {"current_page": 2, "last_page": 3},
             "data": [
@@ -200,7 +205,8 @@ mod tests {
                 external,
                 wrong_format,
                 {"id": "incomplete"},
-                wallpaper("ab0006", "sfw", 3840, 2160)
+                wallpaper("ab0006", "sfw", 3840, 2160),
+                wrong_thumbnail,
             ]
         })
         .to_string();
@@ -211,6 +217,10 @@ mod tests {
             .map(|item| item.title.as_str())
             .collect();
         assert_eq!(titles, ["Wallpaper ab0001", "Wallpaper ab0006"]);
+        assert_eq!(
+            page.listings[0].thumbnail.as_deref(),
+            Some("https://th.wallhaven.cc/orig/ab/ab0001.jpg")
+        );
         assert!(page.listings.iter().all(|item| !item.animated()));
         assert!(matches!(page.next, Some(SearchCursor::Wallhaven(3))));
         assert!(parse(response.as_bytes(), &criteria, 3).is_err());
