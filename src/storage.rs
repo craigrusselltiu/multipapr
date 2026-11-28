@@ -5,17 +5,20 @@ use crate::{
     process,
 };
 use anyhow::{Context, Result, ensure};
-use image::{DynamicImage, ImageFormat, ImageReader, imageops::FilterType};
+use image::{DynamicImage, ImageDecoder, ImageFormat, ImageReader, imageops::FilterType};
+use sha2::{Digest, Sha256};
 use std::{
     env, fs,
-    io::{self, Read, Write},
-    os::windows::process::CommandExt,
+    io::{self, BufReader, Read, Write},
+    os::windows::{fs::OpenOptionsExt, process::CommandExt},
     path::{Path, PathBuf},
     process::Command,
     ptr::null,
+    sync::OnceLock,
 };
 use windows_sys::Win32::{
     Foundation::{ERROR_LOCK_VIOLATION, ERROR_SHARING_VIOLATION, WAIT_ABANDONED, WAIT_OBJECT_0},
+    Storage::FileSystem::FILE_SHARE_READ,
     System::{
         LibraryLoader::{
             FindResourceW, GetModuleHandleW, LoadResource, LockResource, SizeofResource,
@@ -28,6 +31,22 @@ use winreg::{RegKey, enums::HKEY_CURRENT_USER};
 const MPV_SETUP_MUTEX: &str = r"Local\Multipapr.MpvSetup.v1";
 const MPV_RESOURCE_ID: u16 = 101;
 const RT_RCDATA: u16 = 10;
+const MPV_OVERRIDE: &str = "MULTIPAPR_MPV_PATH";
+// SHA-256 of the two files in the archive pinned in build.rs.
+const MPV_FILES: [(&str, &str); 2] = [
+    (
+        "mpv.exe",
+        "3ea89fe7a4284b25dff3c72e1bde83e27324c90cfc4a074fe679293d19ee7c85",
+    ),
+    (
+        "d3dcompiler_43.dll",
+        "4b074a3976399dc735484f5d43d04b519b7bdee8ac719d9ab8ed6bd4e6be0345",
+    ),
+];
+pub const MAX_MEDIA_PIXELS: u64 = 7680 * 4320;
+pub const MPV_FRAME_INFO: &str =
+    "--term-playing-msg=MULTIPAPR:${video-params/dw}:${video-params/dh}:${video-params/rotate}";
+const MAX_MEDIA_EDGE: u32 = 16_384;
 
 fn app_dir() -> Result<PathBuf> {
     Ok(
@@ -56,19 +75,16 @@ pub fn in_wallpaper_dir(path: &Path, dir: &Path) -> bool {
 }
 
 pub fn wallpaper_command(path: &Path) -> Result<Command> {
-    let managed = wallpaper_dir()?;
-    if in_wallpaper_dir(path, &managed) {
-        let demuxer = path
-            .extension()
-            .is_some_and(|ext| ext.eq_ignore_ascii_case("mp4"))
-            .then_some("mov");
-        return restricted_media_command(demuxer);
-    }
-    Ok(command(ensure_mpv()?))
+    Ok(media_command(ensure_mpv()?, media_demuxer(path)))
 }
 
-pub fn restricted_media_command(demuxer: Option<&str>) -> Result<Command> {
-    Ok(media_command(ensure_mpv()?, demuxer))
+pub fn media_demuxer(path: &Path) -> Option<&'static str> {
+    match path.extension()?.to_str()?.to_ascii_lowercase().as_str() {
+        "mp4" | "m4v" | "mov" => Some("mov"),
+        "mkv" | "webm" => Some("matroska"),
+        "ogv" => Some("ogg"),
+        _ => None,
+    }
 }
 
 pub fn preview_media_command(demuxer: Option<&str>) -> Result<Command> {
@@ -80,6 +96,7 @@ pub fn preview_media_command(demuxer: Option<&str>) -> Result<Command> {
 fn media_command(program: PathBuf, demuxer: Option<&str>) -> Command {
     let mut cmd = command(program);
     cmd.args(["--access-references=no", "--autoload-files=no", "--no-ytdl"]);
+    cmd.arg(format!("--vd-lavc-o=max_pixels={MAX_MEDIA_PIXELS}"));
     if let Some(demuxer) = demuxer {
         cmd.args([
             "--demuxer=lavf",
@@ -95,17 +112,54 @@ fn mpv_dir() -> Result<PathBuf> {
         .join(concat!("mpv-", env!("MPV_BUILD"))))
 }
 pub fn mpv() -> Result<PathBuf> {
-    let mut paths = vec![
-        mpv_dir()?.join("mpv.exe"),
-        env::current_exe()?.with_file_name("mpv.exe"),
-    ];
-    paths.extend(
-        env::split_paths(&env::var_os("PATH").unwrap_or_default()).map(|p| p.join("mpv.exe")),
-    );
-    paths
-        .into_iter()
-        .find(|p| p.is_file())
-        .context("Install mpv or place mpv.exe beside multipapr.exe")
+    if let Some(configured) = env::var_os(MPV_OVERRIDE) {
+        let path = PathBuf::from(configured);
+        ensure!(
+            path.is_absolute()
+                && path
+                    .extension()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("exe"))
+                && path.is_file(),
+            "{MPV_OVERRIDE} must point to an existing executable by absolute path"
+        );
+        return canonical_path(&path);
+    }
+    // Keep the verified executable and DLL open without write/delete sharing while in use.
+    static VERIFIED: OnceLock<(PathBuf, Vec<fs::File>)> = OnceLock::new();
+    if let Some((path, _)) = VERIFIED.get() {
+        return Ok(path.clone());
+    }
+    let dir = mpv_dir()?;
+    let files = verify_mpv(&dir)?;
+    let path = dir.join("mpv.exe");
+    let _ = VERIFIED.set((path.clone(), files));
+    Ok(path)
+}
+
+fn verify_mpv(dir: &Path) -> Result<Vec<fs::File>> {
+    let mut files = Vec::new();
+    let mut buf = [0u8; 64 * 1024];
+    for (name, expected) in MPV_FILES {
+        let mut file = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ)
+            .open(dir.join(name))?;
+        let mut hash = Sha256::new();
+        loop {
+            let n = file.read(&mut buf)?;
+            if n == 0 {
+                break;
+            }
+            hash.update(&buf[..n]);
+        }
+        let actual: String = hash.finalize().iter().map(|b| format!("{b:02x}")).collect();
+        ensure!(
+            actual == expected,
+            "Bundled {name} failed its integrity check"
+        );
+        files.push(file);
+    }
+    Ok(files)
 }
 fn mpv_archive() -> Result<&'static [u8]> {
     unsafe {
@@ -125,8 +179,10 @@ fn mpv_archive() -> Result<&'static [u8]> {
     }
 }
 pub fn ensure_mpv() -> Result<PathBuf> {
-    if let Ok(path) = mpv() {
-        return Ok(path);
+    match mpv() {
+        Ok(path) => return Ok(path),
+        Err(e) if env::var_os(MPV_OVERRIDE).is_some() => return Err(e),
+        Err(_) => {}
     }
     let mutex =
         Handle::checked(unsafe { CreateMutexW(null(), 0, wide(MPV_SETUP_MUTEX).as_ptr()) })?;
@@ -150,8 +206,11 @@ pub fn ensure_mpv() -> Result<PathBuf> {
     let dir = mpv_dir()?;
     let staging = dir.with_extension("partial");
     let _ = fs::remove_dir_all(&staging);
-    let _ = fs::remove_dir_all(&dir);
     unpack(mpv_archive()?, &staging).context("Cannot unpack the bundled mpv")?;
+    drop(verify_mpv(&staging)?);
+    if dir.exists() {
+        fs::remove_dir_all(&dir).context("Cannot replace damaged mpv installation")?;
+    }
     fs::rename(&staging, &dir)?;
     mpv()
 }
@@ -166,14 +225,31 @@ fn unpack(bundle: &[u8], dest: &Path) -> Result<()> {
     z.window_log_max(31)?;
     let mut u32_buf = [0u8; 4];
     z.read_exact(&mut u32_buf)?;
-    for _ in 0..u32::from_le_bytes(u32_buf) {
+    ensure!(
+        u32::from_le_bytes(u32_buf) as usize == MPV_FILES.len(),
+        "Invalid mpv bundle"
+    );
+    for (expected_name, _) in MPV_FILES {
         z.read_exact(&mut u32_buf)?;
-        let mut name = vec![0; u32::from_le_bytes(u32_buf) as usize];
+        ensure!(
+            u32::from_le_bytes(u32_buf) as usize == expected_name.len(),
+            "Invalid bundled file"
+        );
+        let mut name = vec![0; expected_name.len()];
         z.read_exact(&mut name)?;
+        ensure!(
+            name == expected_name.as_bytes(),
+            "Unexpected file in mpv bundle"
+        );
         let mut size = [0u8; 8];
         z.read_exact(&mut size)?;
-        let mut file = fs::File::create(dest.join(String::from_utf8(name)?))?;
-        io::copy(&mut (&mut z).take(u64::from_le_bytes(size)), &mut file)?;
+        let size = u64::from_le_bytes(size);
+        ensure!(size <= 256 * 1024 * 1024, "Bundled file is too large");
+        let mut file = fs::File::create_new(dest.join(expected_name))?;
+        ensure!(
+            io::copy(&mut (&mut z).take(size), &mut file)? == size,
+            "Incomplete bundled file"
+        );
     }
     Ok(())
 }
@@ -319,7 +395,7 @@ fn probe_with_mpv(path: &Path) -> Result<(u32, u32)> {
             "--vo=image",
             "--vo-image-format=jpg",
             "--vo-image-jpeg-quality=85",
-            "--vf=lavfi=[scale=1280:960:force_original_aspect_ratio=decrease]",
+            "--vf=lavfi=[scale=1280:960:force_original_aspect_ratio=decrease:reset_sar=1]",
             "--frames=1",
             "--ao=null",
             "--no-audio",
@@ -372,24 +448,55 @@ pub fn canonical_path(path: &Path) -> Result<PathBuf> {
     Ok(std::path::absolute(dunce_path(&path))?)
 }
 
+pub fn check_media_size(width: u32, height: u32) -> Result<()> {
+    ensure!(
+        width > 0
+            && height > 0
+            && width.max(height) <= MAX_MEDIA_EDGE
+            && u64::from(width) * u64::from(height) <= MAX_MEDIA_PIXELS,
+        "Unsupported wallpaper dimensions ({width} × {height})"
+    );
+    Ok(())
+}
+
+fn image_decoder(path: &Path) -> Result<Option<impl ImageDecoder>> {
+    let mut reader =
+        ImageReader::new(BufReader::new(fs::File::open(path)?)).with_guessed_format()?;
+    if !reader
+        .format()
+        .is_some_and(|format| format.reading_enabled())
+    {
+        return Ok(None);
+    }
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(MAX_MEDIA_EDGE);
+    limits.max_image_height = Some(MAX_MEDIA_EDGE);
+    limits.max_alloc = Some(256 * 1024 * 1024);
+    reader.limits(limits.clone());
+    let mut decoder = reader.into_decoder()?;
+    let (w, h) = decoder.dimensions();
+    check_media_size(w, h)?;
+    limits.reserve(decoder.total_bytes())?;
+    decoder.set_limits(limits)?;
+    Ok(Some(decoder))
+}
+
+pub fn decode_image(path: &Path) -> Result<Option<DynamicImage>> {
+    Ok(image_decoder(path)?
+        .map(DynamicImage::from_decoder)
+        .transpose()?)
+}
+
 fn probe_media(
     path: &Path,
     probe_video: impl FnOnce(&Path) -> Result<(u32, u32)>,
 ) -> Result<Media> {
     let path = canonical_path(path)?;
-    if let Ok(reader) = ImageReader::open(&path).and_then(|r| r.with_guessed_format())
-        && let Ok((w, h)) = reader.into_dimensions()
-        && w > 0
-        && h > 0
-    {
-        return Ok(Media {
-            path,
-            width: w,
-            height: h,
-        });
-    }
-    let (w, h) = probe_video(&path)?;
-    ensure!(w > 0 && h > 0, "Invalid source dimensions");
+    let (w, h) = match image_decoder(&path)? {
+        Some(decoder) => decoder.dimensions(),
+        None => probe_video(&path)?,
+    };
+    check_media_size(w, h)?;
     Ok(Media {
         path,
         width: w,
@@ -403,7 +510,7 @@ pub fn probe(path: &Path) -> Result<Media> {
 
 pub fn probe_read_only(path: &Path) -> Result<Media> {
     probe_media(path, |path| {
-        let mut command = preview_media_command(None)?;
+        let mut command = preview_media_command(media_demuxer(path))?;
         command
             .args([
                 "--no-config",
@@ -412,9 +519,8 @@ pub fn probe_read_only(path: &Path) -> Result<Media> {
                 "--vo=null",
                 "--no-audio",
                 "--no-sub",
-                "--vd-lavc-o=max_pixels=33177600",
                 "--frames=1",
-                "--term-status-msg=MULTIPAPR:${video-params/dw}:${video-params/dh}:${video-params/rotate}",
+                MPV_FRAME_INFO,
                 "--",
             ])
             .arg(path);
@@ -442,13 +548,16 @@ fn preview_in(media: &Media, dir: &Path) -> Result<image::RgbaImage> {
     preview_at(media, &preview_path_in(&media.path, dir)?, true)
 }
 fn preview_at(media: &Media, path: &Path, cache: bool) -> Result<image::RgbaImage> {
-    if let Ok(image) = image::open(path) {
-        return Ok(image.into_rgba8());
+    if let Ok(Some(decoder)) = image_decoder(path) {
+        let (w, h) = decoder.dimensions();
+        if w <= 1280
+            && h <= 960
+            && let Ok(image) = DynamicImage::from_decoder(decoder)
+        {
+            return Ok(image.into_rgba8());
+        }
     }
-    let decoded = ImageReader::open(&media.path)?
-        .with_guessed_format()?
-        .decode()
-        .context("Cannot preview this media file")?;
+    let decoded = decode_image(&media.path)?.context("Cannot preview this media file")?;
     let scaled = if decoded.width() > 1280 || decoded.height() > 960 {
         decoded.resize(1280, 960, FilterType::Triangle)
     } else {
@@ -528,6 +637,33 @@ mod tests {
         let out = b"[probe] MULTIPAPR:3840:2160\r\n";
         assert_eq!(parse_mpv_dimensions(out), Some((3840, 2160)));
         assert_eq!(parse_mpv_dimensions(b"nothing here"), None);
+    }
+
+    #[test]
+    fn media_limits_accept_8k_and_reject_oversized_display_dimensions() {
+        assert!(check_media_size(7680, 4320).is_ok());
+        assert!(check_media_size(4320, 7680).is_ok());
+        for (w, h) in [(0, 1), (1, u32::MAX), (8192, 8192)] {
+            assert!(check_media_size(w, h).is_err());
+        }
+        let file = tempfile::NamedTempFile::new().unwrap();
+        assert!(probe_media(file.path(), |_| Ok((8192, 8192))).is_err());
+    }
+
+    #[test]
+    fn imported_videos_use_the_restricted_decoder_options() {
+        let path = Path::new(r"C:\Downloads\landscape.MP4");
+        let cmd = media_command("mpv.exe".into(), media_demuxer(path));
+        let args: Vec<_> = cmd.get_args().filter_map(|arg| arg.to_str()).collect();
+        for option in [
+            "--access-references=no",
+            "--autoload-files=no",
+            "--no-ytdl",
+            "--demuxer-lavf-format=mov",
+            "--vd-lavc-o=max_pixels=33177600",
+        ] {
+            assert!(args.contains(&option));
+        }
     }
 
     #[test]

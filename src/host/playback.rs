@@ -321,6 +321,41 @@ mod tests {
     use super::*;
 
     #[test]
+    #[ignore = "extracts the bundled player; use an isolated LOCALAPPDATA"]
+    fn bundled_player_accepts_verified_host_and_editor_connections() -> Result<()> {
+        let pipe = PathBuf::from(format!(r"\\.\pipe\multipapr-test-{}", std::process::id()));
+        let mpv = storage::ensure_mpv()?;
+        let mut player = ManagedChild::spawn(
+            storage::command(mpv)
+                .args([
+                    "--no-config",
+                    "--idle=yes",
+                    "--vo=null",
+                    "--ao=null",
+                    "--no-terminal",
+                ])
+                .arg(format!("--input-ipc-server={}", pipe.display())),
+        )?;
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if update_mapping(&pipe, std::process::id(), "").is_ok()
+                && set_player_property(&pipe, PlayerPeer::Child(player.child.id()), "pause", true)
+                    .is_ok()
+            {
+                break;
+            }
+            ensure!(player.child.try_wait()?.is_none(), "Player exited");
+            ensure!(
+                Instant::now() < deadline,
+                "Player control connection timed out"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(set_player_property(&pipe, PlayerPeer::Child(0), "pause", false).is_err());
+        Ok(())
+    }
+
+    #[test]
     fn playback_waits_for_the_requested_layout_and_its_fade() {
         let requested = SystemTime::now();
         let mut report = PlaybackReport {

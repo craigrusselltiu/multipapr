@@ -2,7 +2,9 @@
 param(
     [switch]$FromSource,
     [switch]$FromRelease,
-    [string]$Version = 'latest'
+    [ValidatePattern('^(latest|v[0-9]+\.[0-9]+\.[0-9]+)$')]
+    [string]$Version = 'latest',
+    [string]$VerifyFile
 )
 $ErrorActionPreference = 'Stop'
 $repo = 'craigrusselltiu/multipapr'
@@ -10,11 +12,48 @@ $installDir = Join-Path $env:LOCALAPPDATA 'Multipapr'
 $installed = Join-Path $installDir 'multipapr.exe'
 $legacyMpvDir = Join-Path $installDir 'tools\mpv'
 
+function Open-VerifiedRelease([string]$Path, [string]$ExpectedVersion) {
+    $publicKey = 'RUNTMSAAAADbznhFo8W6lgXHZouchRXo7OWrIXA/hz7dymsvvYK9C6tv5AT356ndYrytLk+yox9tfCtmw3DOx+96i1jeRbFM'
+    $stream = [IO.File]::Open($Path, 'Open', 'Read', 'Read')
+    try {
+        if ((Get-Item -LiteralPath "$Path.sig").Length -ne 64) { throw 'Invalid Multipapr signature length.' }
+        $signature = [IO.File]::ReadAllBytes("$Path.sig")
+        $versionText = [Diagnostics.FileVersionInfo]::GetVersionInfo($Path).ProductVersion
+        $tag = "v$versionText"
+        if ($tag -cnotmatch '^v[0-9]+\.[0-9]+\.[0-9]+$' -or
+            ($ExpectedVersion -ne 'latest' -and $tag -cne $ExpectedVersion)) {
+            throw 'Unexpected Multipapr release version.'
+        }
+        $hash = (Get-FileHash -InputStream $stream -Algorithm SHA256).Hash.ToLowerInvariant()
+        $message = [Text.Encoding]::UTF8.GetBytes("Multipapr Windows x64`n$tag`n$hash`n")
+        $key = [Security.Cryptography.CngKey]::Import([Convert]::FromBase64String($publicKey), [Security.Cryptography.CngKeyBlobFormat]::EccPublicBlob)
+        try {
+            $verifier = [Security.Cryptography.ECDsaCng]::new($key)
+            try {
+                if (-not $verifier.VerifyData($message, $signature, [Security.Cryptography.HashAlgorithmName]::SHA256)) {
+                    throw 'Multipapr publisher signature did not verify.'
+                }
+            } finally { $verifier.Dispose() }
+        } finally { $key.Dispose() }
+        $stream.Position = 0
+        return $stream
+    } catch { $stream.Dispose(); throw }
+}
+
+if ($VerifyFile) {
+    $path = (Resolve-Path -LiteralPath $VerifyFile).ProviderPath
+    (Open-VerifiedRelease $path $Version).Dispose()
+    Write-Host "Verified Multipapr publisher signature for $path."
+    return
+}
+
 $localRepo = $PSScriptRoot -and (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'Cargo.toml'))
 $buildFromSource = $FromSource -or ($localRepo -and -not $FromRelease)
 
 New-Item -ItemType Directory -Force -Path $installDir | Out-Null
 $tempBinary = $null
+$verifiedStream = $null
+$staged = Join-Path $installDir ("multipapr-" + [guid]::NewGuid() + ".tmp")
 
 try {
     if ($buildFromSource) {
@@ -43,13 +82,21 @@ try {
         }
         $tempBinary = Join-Path ([IO.Path]::GetTempPath()) ("multipapr-" + [guid]::NewGuid() + ".exe")
         Write-Host "Downloading Multipapr ($Version)..." -ForegroundColor Cyan
+        Invoke-WebRequest -UseBasicParsing "$releaseBase/multipapr.exe.sig" -OutFile "$tempBinary.sig"
         Invoke-WebRequest -UseBasicParsing "$releaseBase/multipapr.exe" -OutFile $tempBinary
+        $verifiedStream = Open-VerifiedRelease $tempBinary $Version
         $binary = $tempBinary
     }
 
+    [IO.File]::Copy($binary, $staged)
     $hosts = @([Diagnostics.Process]::GetProcessesByName('multipapr') | Where-Object Path -eq $installed)
     if ($hosts) {
-        Start-Process -FilePath $installed -ArgumentList '--stop' -WindowStyle Hidden -Wait
+        try {
+            $stop = [Threading.EventWaitHandle]::OpenExisting('Local\Multipapr.Stop.v1')
+            try { [void]$stop.Set() } finally { $stop.Dispose() }
+        } catch [Threading.WaitHandleCannotBeOpenedException] {
+            # A standalone editor has no host event. Allow it to exit below.
+        }
         foreach ($process in $hosts) {
             if (-not $process.WaitForExit(4000)) {
                 throw 'Close the Multipapr editor and rerun the installer.'
@@ -61,7 +108,11 @@ try {
         Remove-Item -LiteralPath $legacyMpvDir -Recurse -Force -ErrorAction Continue
     }
 
-    Copy-Item -LiteralPath $binary -Destination $installed -Force
+    if ([IO.File]::Exists($installed)) {
+        [IO.File]::Replace($staged, $installed, [System.Management.Automation.Language.NullString]::Value)
+    } else {
+        [IO.File]::Move($staged, $installed)
+    }
 
     $iconPath = $installed
     if ($localRepo) {
@@ -106,6 +157,11 @@ public static extern void SHChangeNotify(int change, uint flags, string path, Sy
         Write-Host 'Launch Multipapr from the Start Menu to set up your wallpaper.' -ForegroundColor Gray
     }
 } finally {
+    if ($verifiedStream) { $verifiedStream.Dispose() }
+    if ([IO.File]::Exists($staged)) { [IO.File]::Delete($staged) }
+    if ($tempBinary -and (Test-Path -LiteralPath "$tempBinary.sig")) {
+        Remove-Item -LiteralPath "$tempBinary.sig" -Force
+    }
     if ($tempBinary -and (Test-Path -LiteralPath $tempBinary)) {
         Remove-Item -LiteralPath $tempBinary -Force
     }

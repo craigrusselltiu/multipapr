@@ -6,20 +6,29 @@ use std::{
     cmp::Ordering,
     env, fs,
     io::{Read, Write},
+    os::windows::fs::OpenOptionsExt,
     path::{Path, PathBuf},
     sync::atomic::{AtomicBool, Ordering as AtomicOrdering},
     time::Duration,
 };
 use tempfile::NamedTempFile;
 use windows_sys::Win32::Networking::WinHttp::*;
+use windows_sys::Win32::Security::Cryptography::{
+    BCRYPT_ECCPUBLIC_BLOB, BCRYPT_ECDSA_P256_ALG_HANDLE, BCryptDestroyKey, BCryptImportKeyPair,
+    BCryptVerifySignature,
+};
+use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_DELETE, FILE_SHARE_READ};
 
 const ASSET_NAME: &str = "multipapr.exe";
 const LATEST_API_URL: &str =
     "https://api.github.com/repos/craigrusselltiu/multipapr/releases/latest";
 const LATEST_WEB_URL: &str = "https://github.com/craigrusselltiu/multipapr/releases/latest";
 const DOWNLOAD_PREFIX: &str = "https://github.com/craigrusselltiu/multipapr/releases/download/";
-const TAG_PATH_SEGMENT: &str = "/releases/tag/";
+const TAG_PREFIX: &str = "https://github.com/craigrusselltiu/multipapr/releases/tag/";
 const MAX_API_BYTES: usize = 2 * 1024 * 1024;
+const MAX_UPDATE_BYTES: u64 = 256 * 1024 * 1024;
+const PUBLIC_KEY: &[u8] = include_bytes!("../assets/release-key.blob");
+const SIGNATURE_BYTES: usize = 64;
 
 pub const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -157,14 +166,20 @@ fn parse_api_release(body: &[u8], current: &Version) -> Result<CheckOutcome> {
         return Ok(CheckOutcome::Latest);
     };
     ensure!(
-        asset.browser_download_url.starts_with(DOWNLOAD_PREFIX),
+        version.prerelease.is_none()
+            && api.tag_name == version.display()
+            && asset.browser_download_url == release_url(&version),
         "Unexpected download URL from GitHub"
     );
-    let sha256 = asset.digest.and_then(|d| {
-        d.strip_prefix("sha256:")
-            .filter(|hex| hex.len() == 64 && hex.bytes().all(|b| b.is_ascii_hexdigit()))
-            .map(|hex| hex.to_ascii_lowercase())
-    });
+    let sha256 = asset
+        .digest
+        .map(|d| {
+            d.strip_prefix("sha256:")
+                .filter(|hex| hex.len() == 64 && hex.bytes().all(|b| b.is_ascii_hexdigit()))
+                .map(|hex| hex.to_ascii_lowercase())
+                .context("Invalid release digest from GitHub")
+        })
+        .transpose()?;
     Ok(CheckOutcome::Available(Release {
         version,
         download_url: asset.browser_download_url,
@@ -173,18 +188,27 @@ fn parse_api_release(body: &[u8], current: &Version) -> Result<CheckOutcome> {
     }))
 }
 
+fn release_url(version: &Version) -> String {
+    format!("{DOWNLOAD_PREFIX}{}/{ASSET_NAME}", version.display())
+}
+
 fn parse_redirect_release(location: &str, current: &Version) -> Result<CheckOutcome> {
-    let (_, rest) = location
-        .split_once(TAG_PATH_SEGMENT)
+    let location = url::Url::parse(LATEST_WEB_URL)?.join(location)?;
+    let tag = location
+        .as_str()
+        .strip_prefix(TAG_PREFIX)
         .context("Unexpected redirect from GitHub")?;
-    let tag = rest.split(['/', '?', '#']).next().unwrap_or("");
     let version = Version::parse(tag).with_context(|| format!("Invalid release tag {tag}"))?;
+    ensure!(
+        tag == version.display() && version.prerelease.is_none(),
+        "Unexpected stable release tag"
+    );
     if version <= *current {
         return Ok(CheckOutcome::Latest);
     }
     Ok(CheckOutcome::Available(Release {
+        download_url: release_url(&version),
         version,
-        download_url: format!("{DOWNLOAD_PREFIX}{tag}/{ASSET_NAME}"),
         size: None,
         sha256: None,
     }))
@@ -223,6 +247,42 @@ pub fn check_latest() -> Result<CheckOutcome> {
     bail!("GitHub returned HTTP {}", response.status)
 }
 
+fn verify_release(version: &Version, sha256: &str, signature: &[u8]) -> Result<()> {
+    ensure!(
+        signature.len() == SIGNATURE_BYTES,
+        "Invalid release signature length"
+    );
+    let message = format!("Multipapr Windows x64\n{}\n{sha256}\n", version.display());
+    let digest = Sha256::digest(message.as_bytes());
+    unsafe {
+        let mut key = std::ptr::null_mut();
+        ensure!(
+            BCryptImportKeyPair(
+                BCRYPT_ECDSA_P256_ALG_HANDLE,
+                std::ptr::null_mut(),
+                BCRYPT_ECCPUBLIC_BLOB,
+                &mut key,
+                PUBLIC_KEY.as_ptr(),
+                PUBLIC_KEY.len() as u32,
+                0
+            ) >= 0,
+            "Cannot load the Multipapr publisher key"
+        );
+        let status = BCryptVerifySignature(
+            key,
+            std::ptr::null(),
+            digest.as_ptr(),
+            digest.len() as u32,
+            signature.as_ptr(),
+            signature.len() as u32,
+            0,
+        );
+        BCryptDestroyKey(key);
+        ensure!(status >= 0, "Multipapr publisher signature did not verify");
+    }
+    Ok(())
+}
+
 pub fn download_update(
     release: &Release,
     target_dir: &Path,
@@ -233,11 +293,38 @@ pub fn download_update(
         bail!("Prebuilt updates currently target Windows x64");
     }
     ensure!(
-        release.download_url.starts_with(DOWNLOAD_PREFIX),
+        release.download_url == release_url(&release.version)
+            && release.version.prerelease.is_none(),
         "Unexpected update download URL"
     );
-    let mut staged =
-        NamedTempFile::new_in(target_dir).context("Cannot write to the Multipapr folder")?;
+    ensure!(!cancel.load(AtomicOrdering::Relaxed), "Update cancelled");
+    let signature = HttpRequest::send(
+        "GET",
+        &format!("{}.sig", release.download_url),
+        &[],
+        true,
+        15_000,
+    )?;
+    ensure!(
+        signature.status == HTTP_STATUS_OK,
+        "Missing Multipapr publisher signature (HTTP {})",
+        signature.status
+    );
+    let signature = signature.read_all(SIGNATURE_BYTES)?;
+    ensure!(
+        signature.len() == SIGNATURE_BYTES,
+        "Invalid release signature length"
+    );
+    let mut staged = tempfile::Builder::new()
+        .make_in(target_dir, |path| {
+            fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create_new(true)
+                .share_mode(FILE_SHARE_READ | FILE_SHARE_DELETE)
+                .open(path)
+        })
+        .context("Cannot write to the Multipapr folder")?;
     let mut response = HttpRequest::send("GET", &release.download_url, &[], true, 60_000)?;
     ensure!(
         response.status == HTTP_STATUS_OK,
@@ -245,6 +332,10 @@ pub fn download_update(
         response.status
     );
     let total = response.content_length().or(release.size);
+    ensure!(
+        total.is_none_or(|n| n <= MAX_UPDATE_BYTES),
+        "Update is too large"
+    );
     let mut hasher = Sha256::new();
     let mut downloaded: u64 = 0;
     let mut magic = [0u8; 2];
@@ -260,6 +351,10 @@ pub fn download_update(
             break;
         }
         let slice = &buf[..read];
+        ensure!(
+            downloaded + read as u64 <= MAX_UPDATE_BYTES,
+            "Update is too large"
+        );
         if magic_len < 2 {
             let take = (2 - magic_len).min(slice.len());
             magic[magic_len..magic_len + take].copy_from_slice(&slice[..take]);
@@ -282,17 +377,19 @@ pub fn download_update(
             "Download was incomplete ({downloaded} of {expected_total} bytes)"
         );
     }
+    let actual: String = hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    verify_release(&release.version, &actual, &signature)?;
     if let Some(expected) = &release.sha256 {
-        let actual: String = hasher
-            .finalize()
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect();
         ensure!(
             actual.eq_ignore_ascii_case(expected),
             "Downloaded file failed integrity check"
         );
     }
+    ensure!(!cancel.load(AtomicOrdering::Relaxed), "Update cancelled");
     staged.flush().context("Cannot flush update file")?;
     Ok(staged)
 }
@@ -375,6 +472,40 @@ pub fn cleanup_old_executables() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn publisher_signature_binds_the_version_and_file_digest() {
+        let version = Version::parse("0.0.0").unwrap();
+        let digest = "0".repeat(64);
+        // Public verification vector for the all-zero digest. No signing key is needed to test.
+        let hex = concat!(
+            "6529e5bff9af7b38dd5e4411bd30087a484e4a3fa1d17aa0da5e6ebcc3ea833a",
+            "7e57ba68c30f15c469797ae487d02bab2b03c6205a195c1a9bb25ffb09ba2025"
+        );
+        let signature: Vec<u8> = (0..hex.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
+            .collect();
+        verify_release(&version, &digest, &signature).unwrap();
+        assert!(verify_release(&Version::parse("0.0.1").unwrap(), &digest, &signature).is_err());
+        assert!(verify_release(&version, &"1".repeat(64), &signature).is_err());
+        assert!(verify_release(&version, &digest, &signature[1..]).is_err());
+    }
+
+    #[test]
+    #[ignore = "requires this signed version to be published on GitHub"]
+    fn published_binary_passes_the_update_verifier() -> Result<()> {
+        let version = Version::parse(CURRENT_VERSION).unwrap();
+        let release = Release {
+            download_url: release_url(&version),
+            version,
+            size: None,
+            sha256: None,
+        };
+        let dir = tempfile::tempdir()?;
+        download_update(&release, dir.path(), &AtomicBool::new(false), |_, _| {})?;
+        Ok(())
+    }
 
     #[test]
     fn compares_versions_numerically_and_handles_v_prefix() {

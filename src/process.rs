@@ -100,6 +100,11 @@ pub fn spawn_preview_decoder(command: &Command) -> Result<(Handle, PipeWriter, P
         quote_argument(&mut arguments, argument)?;
     }
     arguments.push(0);
+    let directory = command
+        .get_current_dir()
+        .or_else(|| program.parent())
+        .context("Missing decoder directory")?;
+    let directory: Vec<_> = directory.as_os_str().encode_wide().chain([0]).collect();
     let program: Vec<_> = program.as_os_str().encode_wide().chain([0]).collect();
 
     // Keep other launches from inheriting the decoder's pipes while these ends are inheritable.
@@ -169,7 +174,7 @@ pub fn spawn_preview_decoder(command: &Command) -> Result<(Handle, PipeWriter, P
                 1,
                 CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT,
                 null(),
-                null(),
+                directory.as_ptr(),
                 &startup.StartupInfo,
                 &mut child,
             ) != 0,

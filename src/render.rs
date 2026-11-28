@@ -5,7 +5,7 @@ use crate::{
     storage,
 };
 use anyhow::{Context, Result, ensure};
-use image::{DynamicImage, ImageReader, imageops::FilterType};
+use image::{DynamicImage, imageops::FilterType};
 use std::{fs, path::Path, thread};
 
 const STRIP_ROWS: usize = 64;
@@ -56,9 +56,7 @@ pub fn display_crop(
 }
 
 pub fn decode_source(path: &Path) -> Result<SourceImage> {
-    if let Ok(reader) = ImageReader::open(path).and_then(ImageReader::with_guessed_format)
-        && let Ok(decoded) = reader.decode()
-    {
+    if let Some(decoded) = storage::decode_image(path)? {
         return Ok(flatten_to_rgb(decoded));
     }
     decode_video_first_frame(path)
@@ -93,7 +91,7 @@ fn flatten_to_rgb(img: DynamicImage) -> SourceImage {
 fn parse_video_params(stdout: &[u8]) -> Option<(u32, u32, u32)> {
     let text = String::from_utf8_lossy(stdout);
     text.lines().find_map(|line| {
-        let (_, rest) = line.split_once("MULTIPAPR:")?;
+        let rest = line.trim().strip_prefix("MULTIPAPR:")?;
         let mut values = rest.trim().split(':');
         let w = values.next()?.parse::<u32>().ok()?;
         let h = values.next()?.parse::<u32>().ok()?;
@@ -118,6 +116,8 @@ fn decode_video_first_frame(path: &Path) -> Result<SourceImage> {
             "--input-terminal=no",
             "--hwdec=no",
             "--video-rotate=no",
+            // Export coded pixels. Apply the display aspect only after validating its dimensions.
+            "--vf=lavfi=[setsar=1]",
             "--vo=image",
             "--vo-image-format=png",
             "--vo-image-png-compression=0",
@@ -128,31 +128,31 @@ fn decode_video_first_frame(path: &Path) -> Result<SourceImage> {
             "--no-audio",
             "--no-sub",
             "--image-display-duration=0",
-            "--term-status-msg=MULTIPAPR:${video-params/dw}:${video-params/dh}:${video-params/rotate}",
+            storage::MPV_FRAME_INFO,
         ])
         .arg(format!("--vo-image-outdir={}", temp.path().display()))
         .arg("--")
         .arg(path);
     let output = process::decoder_output(&command).context("Cannot decode first frame with mpv")?;
+    let (dw, dh, rotation) = parse_video_params(&output).context("Cannot read frame dimensions")?;
+    storage::check_media_size(dw, dh)?;
     let frame_path = fs::read_dir(temp.path())?
         .filter_map(|e| e.ok().map(|e| e.path()))
         .find(|p| p.extension().and_then(|e| e.to_str()) == Some("png"))
         .context("mpv did not write a first frame")?;
-    let mut img = ImageReader::open(&frame_path)?
-        .with_guessed_format()?
-        .decode()
-        .context("Cannot read extracted video frame")?;
-    if let Some((dw, dh, rotation)) = parse_video_params(&output) {
-        if (img.width(), img.height()) != (dw, dh) {
-            img = img.resize_exact(dw, dh, FilterType::Triangle);
-        }
-        img = match rotation {
-            90 => img.rotate90(),
-            180 => img.rotate180(),
-            270 => img.rotate270(),
-            _ => img,
-        };
+    let mut img =
+        storage::decode_image(&frame_path)?.context("Cannot read extracted video frame")?;
+    if (img.width(), img.height()) != (dw, dh) {
+        // The triangle resampler allocates this intermediate before its horizontal pass.
+        storage::check_media_size(img.width(), dh)?;
+        img = img.resize_exact(dw, dh, FilterType::Triangle);
     }
+    img = match rotation {
+        90 => img.rotate90(),
+        180 => img.rotate180(),
+        270 => img.rotate270(),
+        _ => img,
+    };
     Ok(flatten_to_rgb(img))
 }
 
@@ -544,6 +544,20 @@ pub fn black_bmp() -> Vec<u8> {
 mod tests {
     use super::*;
     use crate::layout::{Media, Rect};
+
+    #[test]
+    #[ignore = "extracts the bundled player; use an isolated LOCALAPPDATA"]
+    fn imported_anamorphic_video_keeps_its_display_size() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let video = temp.path().join("sample.mp4");
+        fs::write(&video, include_bytes!("../tests/fixtures/anamorphic.mp4"))?;
+        let wallpaper = crate::gallery::import(&video)?;
+        let media = wallpaper.saved.media;
+        assert_eq!((media.width, media.height), (128, 32));
+        let frame = decode_source(&media.path)?;
+        assert_eq!((frame.width, frame.height), (128, 32));
+        Ok(())
+    }
 
     #[test]
     fn renders_exact_crop_and_black_margins_in_both_bgra_and_bmp() {

@@ -1453,6 +1453,7 @@ impl Editor {
                             shader::parameters(&layout, &self.settings, &self.displays, part);
                         delivered &= host::update_mapping(
                             &host::player_pipe(host, self.settings.multi, part, &self.displays),
+                            host,
                             &parameters,
                         )
                         .is_ok();
@@ -1694,9 +1695,11 @@ fn is_missing_file(error: &anyhow::Error) -> bool {
 pub fn open() -> Result<()> {
     let exe = std::env::current_exe()?;
     update::cleanup_old_executables();
-    if storage::mpv().is_err() {
-        std::thread::spawn(storage::warm_up_mpv);
-    }
+    std::thread::spawn(|| {
+        if storage::mpv().is_err() {
+            storage::warm_up_mpv();
+        }
+    });
     let displays = displays::detect()?;
     let settings = storage::load_optional()?.unwrap_or_else(|| Settings::new(Media::default()));
     let profiles = storage::load_profiles();

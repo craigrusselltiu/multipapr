@@ -105,7 +105,8 @@ fn read_details(path: &Path) -> Option<Details> {
         return None;
     }
     let details: Details = serde_json::from_slice(&fs::read(path).ok()?).ok()?;
-    (details.width > 0 && details.height > 0).then_some(details)
+    storage::check_media_size(details.width, details.height).ok()?;
+    Some(details)
 }
 
 pub(super) fn file_name(title: &str, digest: &[u8], extension: &str) -> String {

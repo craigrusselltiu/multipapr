@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## v0.3.8
+
+- The installer and in-app updater verify release signatures using the Multipapr publisher key. The installation instructions also verify the installer itself.
+- Playback defaults to the verified bundled mpv executable and DLL. External builds require an explicitly configured path. Local imports use the same external-reference restrictions as Gallery downloads.
+- Wallpaper images and video frames have an 8K pixel budget and a 16,384-pixel edge limit. Oversized media is rejected before image decoding or resizing.
+- Player controls verify the process behind the Windows named pipe and use identification-only access. Updated the URL parser to 2.5.9.
+
 ## v0.3.7
 
 - Gallery uses uncropped Wallhaven thumbnails so portrait and ultrawide hover previews show the full image.

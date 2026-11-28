@@ -126,22 +126,13 @@ pub fn motion_preview(listing: &Listing, cancellation: &Cancellation) -> Result<
 }
 
 pub fn local_motion_preview(path: &Path) -> Result<PreviewFrames> {
-    let demuxer = path
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .and_then(|ext| match ext.to_ascii_lowercase().as_str() {
-            "mp4" | "m4v" | "mov" => Some("mov"),
-            "mkv" | "webm" => Some("matroska"),
-            "ogv" => Some("ogg"),
-            _ => None,
-        });
-    decode(demuxer, Some(path), Vec::new())
+    decode(storage::media_demuxer(path), Some(path), Vec::new())
 }
 
 fn decode(demuxer: Option<&str>, path: Option<&Path>, bytes: Vec<u8>) -> Result<PreviewFrames> {
     let fps = PreviewFrames::FPS;
     let max_pixels = if path.is_some() {
-        33_177_600
+        storage::MAX_MEDIA_PIXELS
     } else {
         4_147_200
     };

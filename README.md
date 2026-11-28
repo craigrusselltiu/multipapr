@@ -33,11 +33,19 @@ Windows spans wallpapers by **pixels**, which breaks scale and alignment across 
 
 ## Install
 
-Download [`multipapr.exe`](https://github.com/craigrusselltiu/multipapr/releases/latest/download/multipapr.exe) and run it, or run one command in PowerShell to install it with a Start menu entry:
+Run this in PowerShell to install Multipapr v0.3.8 with a Start menu entry. It checks the installer against the hash pinned here. The installer then verifies the executable with Multipapr’s publisher key.
 
 ```powershell
-irm https://raw.githubusercontent.com/craigrusselltiu/multipapr/main/install.ps1 | iex
+$installer = (New-Object Net.WebClient).DownloadData('https://github.com/craigrusselltiu/multipapr/releases/download/v0.3.8/install.ps1')
+$hash = [BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash($installer)).Replace('-', '')
+if ($hash -eq '493026C03BD9E7268DAA4D84032AF62E434769D0CDE38EC31710750C7876ED6D') {
+    & ([ScriptBlock]::Create([Text.Encoding]::UTF8.GetString($installer))) -FromRelease -Version v0.3.8
+} else { throw 'Installer verification failed' }
 ```
+
+For portable use, download `multipapr.exe` and `multipapr.exe.sig` into the same folder. From that folder, run the block above with `-VerifyFile .\multipapr.exe` in place of `-FromRelease`. Launch the executable after verification succeeds. [Release downloads](https://github.com/craigrusselltiu/multipapr/releases/tag/v0.3.8)
+
+If you’re upgrading from v0.3.7 or earlier, use these installation instructions to verify your first signed release. Subsequent in-app updates verify the signature automatically.
 
 ## Goal
 
@@ -65,6 +73,8 @@ The problem Multipapr tries to solve is the visible jump where a wallpaper cross
 > [!NOTE]
 > Playback uses [mpv](https://mpv.io/), which is built into the exe and unpacked once on first use.
 
+Multipapr verifies the bundled player and its DLL. To use a trusted external build, explicitly set the environment variable `MULTIPAPR_MPV_PATH` to its absolute executable path before starting Multipapr.
+
 Multipapr decodes a shared video once, using the GPU when possible. Still images render once and then idle.
 
 ## CLI
@@ -87,6 +97,15 @@ cd multipapr
 cargo test --release --locked
 .\install.ps1 -FromSource
 ```
+
+</details>
+
+<details>
+<summary><b>Signing a release</b></summary>
+
+After building the Windows x64 release, run `.\scripts\sign-release.ps1` under the Windows account holding the CNG key `Multipapr Release Signing v1`. This writes and verifies `multipapr.exe.sig`. Publish the signature alongside the executable, installer and license notices. Update the installer hash and release tag in the install instructions for each release.
+
+The updater and installer pin the ECDSA P-256 public key. Keep an encrypted backup of the publisher key for release-machine recovery. A key change for installed clients needs a transition release signed by the existing key.
 
 </details>
 

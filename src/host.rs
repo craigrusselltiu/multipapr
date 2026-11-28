@@ -16,7 +16,7 @@ use std::{
     fs,
     hash::{DefaultHasher, Hash, Hasher},
     io::{self, Write},
-    os::windows::io::AsRawHandle,
+    os::windows::{ffi::OsStringExt, fs::OpenOptionsExt, io::AsRawHandle},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     ptr::{null, null_mut},
@@ -26,9 +26,11 @@ use std::{
     },
     time::{Duration, Instant, SystemTime},
 };
+use windows_sys::Wdk::System::Threading::{NtQueryInformationProcess, ProcessBasicInformation};
 use windows_sys::Win32::{
     Foundation::*,
-    System::{JobObjects::*, Threading::*},
+    Storage::FileSystem::SECURITY_IDENTIFICATION,
+    System::{JobObjects::*, Pipes::GetNamedPipeServerProcessId, Threading::*},
     UI::WindowsAndMessaging::*,
 };
 
@@ -229,11 +231,77 @@ pub fn player_pipe(host_id: u32, multi: bool, part: &Part, displays: &[Display])
     ))
 }
 
-pub fn update_mapping(pipe: &Path, parameters: &str) -> Result<()> {
-    set_player_property(pipe, "glsl-shader-opts", parameters)
+enum PlayerPeer {
+    Child(u32),
+    OfHost(u32),
 }
-fn set_player_property(pipe: &Path, name: &str, value: impl serde::Serialize) -> Result<()> {
-    let mut ipc = fs::OpenOptions::new().read(true).write(true).open(pipe)?;
+
+impl PlayerPeer {
+    fn verify(&self, server: u32) -> Result<()> {
+        let host = match *self {
+            Self::Child(pid) => {
+                ensure!(pid == server, "Unexpected player process");
+                return Ok(());
+            }
+            Self::OfHost(host) => host,
+        };
+        // The editor knows its host PID. Verify the server's parent and executable with Windows.
+        let process =
+            Handle::checked(unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, server) })?;
+        let mut info: PROCESS_BASIC_INFORMATION = unsafe { std::mem::zeroed() };
+        let status = unsafe {
+            NtQueryInformationProcess(
+                process.0,
+                ProcessBasicInformation,
+                std::ptr::from_mut(&mut info).cast(),
+                size_of_val(&info) as u32,
+                null_mut(),
+            )
+        };
+        ensure!(
+            status >= 0 && info.InheritedFromUniqueProcessId == host as usize,
+            "Unexpected player parent"
+        );
+        let mut path = vec![0u16; 32768];
+        let mut len = path.len() as u32;
+        ensure!(
+            unsafe { QueryFullProcessImageNameW(process.0, 0, path.as_mut_ptr(), &mut len) } != 0,
+            "Cannot identify the player executable"
+        );
+        let server_path = PathBuf::from(std::ffi::OsString::from_wide(&path[..len as usize]));
+        ensure!(
+            fs::canonicalize(server_path)? == fs::canonicalize(storage::mpv()?)?,
+            "Unexpected player executable"
+        );
+        Ok(())
+    }
+}
+
+pub fn update_mapping(pipe: &Path, host: u32, parameters: &str) -> Result<()> {
+    set_player_property(
+        pipe,
+        PlayerPeer::OfHost(host),
+        "glsl-shader-opts",
+        parameters,
+    )
+}
+fn set_player_property(
+    pipe: &Path,
+    peer: PlayerPeer,
+    name: &str,
+    value: impl serde::Serialize,
+) -> Result<()> {
+    let mut ipc = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .security_qos_flags(SECURITY_IDENTIFICATION)
+        .open(pipe)?;
+    let mut server = 0;
+    ensure!(
+        unsafe { GetNamedPipeServerProcessId(ipc.as_raw_handle(), &mut server) } != 0,
+        "Cannot identify the player pipe"
+    );
+    peer.verify(server)?;
     writeln!(
         ipc,
         "{}",
@@ -559,16 +627,29 @@ impl Player {
     }
     fn update(&mut self, covered: bool) -> Result<()> {
         self.surface.maintain(self.desktop)?;
-        if !matches!(self.backend, PlayerBackend::Mpv(_)) {
+        let PlayerBackend::Mpv(playback) = &self.backend else {
             return Ok(());
-        }
+        };
+        let pid = playback.process.child.id();
         if let Some(parameters) = &self.pending_mapping
-            && update_mapping(&self.pipe, parameters).is_ok()
+            && set_player_property(
+                &self.pipe,
+                PlayerPeer::Child(pid),
+                "glsl-shader-opts",
+                parameters,
+            )
+            .is_ok()
         {
             self.pending_mapping = None;
         }
         if covered != self.covered
-            && set_player_property(&self.pipe, "user-data/multipapr/covered", covered).is_ok()
+            && set_player_property(
+                &self.pipe,
+                PlayerPeer::Child(pid),
+                "user-data/multipapr/covered",
+                covered,
+            )
+            .is_ok()
         {
             self.covered = covered;
         }
