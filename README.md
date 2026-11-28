@@ -33,19 +33,24 @@ Windows spans wallpapers by **pixels**, which breaks scale and alignment across 
 
 ## Install
 
-Run this in PowerShell to install Multipapr v0.3.8 with a Start menu entry. It checks the installer against the hash pinned here. The installer then verifies the executable with Multipapr’s publisher key.
+Run this in PowerShell to install or update Multipapr. It verifies the latest release and adds Multipapr to the Start menu.
 
 ```powershell
-$installer = (New-Object Net.WebClient).DownloadData('https://github.com/craigrusselltiu/multipapr/releases/download/v0.3.8/install.ps1')
-$hash = [BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash($installer)).Replace('-', '')
-if ($hash -eq '493026C03BD9E7268DAA4D84032AF62E434769D0CDE38EC31710750C7876ED6D') {
-    & ([ScriptBlock]::Create([Text.Encoding]::UTF8.GetString($installer))) -FromRelease -Version v0.3.8
-} else { throw 'Installer verification failed' }
+irm https://raw.githubusercontent.com/craigrusselltiu/multipapr/c6d13fe9cecfeed5c78a1715c6d89fff16d86f98/install.ps1 | iex
 ```
 
-For portable use, download `multipapr.exe` and `multipapr.exe.sig` into the same folder. From that folder, run the block above with `-VerifyFile .\multipapr.exe` in place of `-FromRelease`. Launch the executable after verification succeeds. [Release downloads](https://github.com/craigrusselltiu/multipapr/releases/tag/v0.3.8)
+<details>
+<summary>Use a portable copy</summary>
 
-If you’re upgrading from v0.3.7 or earlier, use these installation instructions to verify your first signed release. Subsequent in-app updates verify the signature automatically.
+Download `multipapr.exe` and `multipapr.exe.sig` from the same release into one folder. [Release downloads](https://github.com/craigrusselltiu/multipapr/releases/latest)
+
+Run this in that folder, then open `multipapr.exe` after verification succeeds.
+
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/craigrusselltiu/multipapr/c6d13fe9cecfeed5c78a1715c6d89fff16d86f98/install.ps1))) -VerifyFile .\multipapr.exe
+```
+
+</details>
 
 ## Goal
 
@@ -103,7 +108,7 @@ cargo test --release --locked
 <details>
 <summary><b>Signing a release</b></summary>
 
-After building the Windows x64 release, run `.\scripts\sign-release.ps1` under the Windows account holding the CNG key `Multipapr Release Signing v1`. This writes and verifies `multipapr.exe.sig`. Publish the signature alongside the executable, installer and license notices. Update the installer hash and release tag in the install instructions for each release.
+After building the Windows x64 release, run `.\scripts\sign-release.ps1` under the Windows account holding the CNG key `Multipapr Release Signing v1`. This writes and verifies `multipapr.exe.sig`. Publish the signature alongside the executable, installer and license notices. When the installer changes, update the install commands to use the full commit SHA containing the new script.
 
 The updater and installer pin the ECDSA P-256 public key. Keep an encrypted backup of the publisher key for release-machine recovery. A key change for installed clients needs a transition release signed by the existing key.
 
